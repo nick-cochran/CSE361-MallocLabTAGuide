@@ -11,6 +11,7 @@
  *                            Malloc Lab TA Guide                             *
  *                                                                            *
  *                           Implemented Features:                            *
+ *                                  Coalesce                                  *
  *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
@@ -45,12 +46,27 @@
 
 /* You can change anything from here onward */
 
+/*** PRINTING UTILITIES ***/
+#define BLACK   "\033[0;30m"
+#define RED     "\033[0;31m"
+#define GREEN   "\033[0;32m"
+#define BLUE    "\033[0;34m"
+#define CYAN    "\033[0;36m"
+#define MAGENTA "\033[0;35m"
+#define YELLOW  "\033[0;33m"
+#define WHITE   "\033[0;37m"
+
+#define BOLD       "\033[1m"
+#define UNDERLINE  "\033[4m"
+#define RESET   "\033[0m"
+
+
 /*
  * If DEBUG is defined, enable printing on dbg_printf and contracts.
  * Debugging macros, with names beginning "dbg_" are allowed.
  * You may not define any other macros having arguments.
  */
-// #define DEBUG // uncomment this line to enable debugging
+ #define DEBUG // *** uncomment this line to enable debugging ***
 
 #ifdef DEBUG
 /* When debugging is enabled, these form aliases to useful functions */
@@ -80,12 +96,18 @@ typedef struct block
 {
     /* Header contains size + allocation flag */
     word_t header;
-    /*
-     * We don't know how big the payload will be.  Declaring it as an
-     * array of size 0 allows computing its starting address using
-     * pointer notation.
-     */
-    char payload[0];
+    union {
+        struct {
+            struct block *next;
+            struct block *prev;
+        };
+        /*
+         * We don't know how big the payload will be.  Declaring it as an
+         * array of size 0 allows computing its starting address using
+         * pointer notation.
+         */
+        char payload[0];
+    };
     /*
      * We can't declare the footer as part of the struct, since its starting
      * position is unknown
@@ -97,7 +119,6 @@ typedef struct block
 /* Pointer to first block */
 static block_t *heap_start = NULL;
 
-bool mm_checkheap(int lineno);
 
 /* Function prototypes for internal helper routines */
 static block_t *extend_heap(size_t size);
@@ -109,11 +130,11 @@ static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
 static word_t pack(size_t size, bool alloc);
 
-static size_t extract_size(word_t header);
+static size_t extract_size(word_t word);
 static size_t get_size(block_t *block);
 static size_t get_payload_size(block_t *block);
 
-static bool extract_alloc(word_t header);
+static bool extract_alloc(word_t word);
 static bool get_alloc(block_t *block);
 
 static void write_header(block_t *block, size_t size, bool alloc);
@@ -125,6 +146,9 @@ static void *header_to_payload(block_t *block);
 static block_t *find_next(block_t *block);
 static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
+
+bool mm_checkheap(int lineno);
+bool printHeap();
 
 
 /**
@@ -164,6 +188,9 @@ bool mm_init(void)
  */
 void *malloc(size_t size) 
 {
+    dbg_printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
+    dbg_ensures(printHeap());
+
     dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
     size_t extendsize; // Amount to extend heap if no fit is found
@@ -214,6 +241,9 @@ void *malloc(size_t size)
  */
 void free(void *bp)
 {
+    dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
+    dbg_ensures(printHeap());
+
     if (bp == NULL)
     {
         return;
@@ -307,11 +337,11 @@ void *calloc(size_t elements, size_t size)
 /******** The remaining content below are helper and debug routines ********/;
 
 /**
- * @brief
+ * @brief extends the heap with the given size
  *
- * @param size
+ * @param size the number of bytes to extend the heap by
  *
- * @return
+ * @return the newly created block
  *
  *
  * @Changelog
@@ -340,39 +370,71 @@ static block_t *extend_heap(size_t size)
     return coalesce(block);
 }
 
-/*
- * <what does coalesce do?>
- *
- * Changelog:
- * - Provided Function at Init.
- */
 /**
- * @brief
+ * @brief coalesces the block with its neighbors
  *
- * @param block
+ * @param block the black being freed
  *
- * @return
+ * @return the resulting block
  *
  * @Changelog
  * - Provided Function at Init.
  */
 static block_t *coalesce(block_t * block) 
 {
-    // fill me in
-    return block;
+    block_t *prev_block = find_prev(block);
+    block_t *next_block = find_next(block);
+
+    size_t block_size = get_size(block);
+
+    bool prev_alloc;
+    if(prev_block == block) { // check edge case where previous block is prologue
+        prev_alloc = true;
+    } else {
+        prev_alloc = get_alloc(prev_block);
+    }
+    bool next_alloc = get_alloc(next_block);
+
+    // case 1
+    if(prev_alloc && next_alloc) {
+        return block;
+    }
+
+    size_t next_size = get_size(next_block);
+
+    // case 2
+    if(prev_alloc && !next_alloc) {
+        block_size += next_size;
+
+        write_header(block, block_size, false);
+        write_footer(block, block_size, false);
+
+        return block;
+    }
+
+    size_t prev_size = get_size(prev_block);
+
+    // case 3
+    if(!prev_alloc && next_alloc) {
+        block_size += prev_size;
+    }
+    // case 4
+    else {
+        block_size += prev_size + next_size;
+    }
+
+    write_header(prev_block, block_size, false);
+    write_footer(prev_block, block_size, false);
+
+    return prev_block;
 }
 
-/*
- * <what does place do?>
- *
- * Changelog:
- * - Provided Function at Init.
- */
 /**
- * @brief
+ * @brief splits the block into a block with the given size if it can be split,
+ *          else writes the new header and footer for the given block
  *
- * @param block
- * @param asize
+ * @param block the block being allocated
+ * @param asize the required number of bytes
  *
  * @Changelog
  * - Provided Function at Init.
@@ -399,17 +461,12 @@ static void place(block_t *block, size_t asize)
     }
 }
 
-/*
- * <what does find_fit do?>
- *
- * Changelog:
- * - Provided Function at Init.
- */
 /**
- * @brief
+ * @brief finds a block that fits the given size
  *
- * @param asize
- * @return
+ * @param asize the required number of bytes
+ *
+ * @return the block that fits the given size, or NULL if no such block exists
  *
  * @Changelog
  * - Provided Function at Init.
@@ -430,14 +487,13 @@ static block_t *find_fit(size_t asize)
     return NULL; // no fit found
 }
 
-
 /**
  * @brief returns x if x > y, and y otherwise.
  *
  * @param x
  * @param y
  *
- * @return
+ * @return the maximum of x and y
  *
  * @Changelog
  * - Provided Function at Init.
@@ -454,7 +510,7 @@ static size_t max(size_t x, size_t y)
  * @param size
  * @param n
  *
- * @return
+ * @return the rounded up size
  *
  * @Changelog
  * - Provided Function at Init.
@@ -472,7 +528,7 @@ static size_t round_up(size_t size, size_t n)
  * @param size
  * @param alloc
  *
- * @return
+ * @return the packed word
  *
  * @Changelog
  * - Provided Function at Init.
@@ -489,7 +545,7 @@ static word_t pack(size_t size, bool alloc)
  *
  * @param word
  *
- * @return
+ * @return the size from the header
  *
  * @Changelog
  * - Provided Function at Init.
@@ -506,7 +562,7 @@ static size_t extract_size(word_t word)
  *
  * @param block
  *
- * @return
+ * @return the size of the block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -523,7 +579,7 @@ static size_t get_size(block_t *block)
  *
  * @param block
  *
- * @return
+ * @return the payload size of the block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -539,9 +595,9 @@ static size_t get_payload_size(block_t *block)
  * @brief returns the allocation status of a given header value based
  *        on the header specification above.
  *
- * @param word
+ * @param word the header of a block
  *
- * @return
+ * @return 1 if allocated, and 0 if free
  *
  * @Changelog
  * - Provided Function at Init.
@@ -558,7 +614,7 @@ static bool extract_alloc(word_t word)
  *
  * @param block
  *
- * @return
+ * @return 1 if allocated, and 0 if free
  *
  * @Changelog
  * - Provided Function at Init.
@@ -611,7 +667,7 @@ static void write_footer(block_t *block, size_t size, bool alloc)
  *
  * @param block
  *
- * @return
+ * @return the next block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -631,7 +687,7 @@ static block_t *find_next(block_t *block)
  *
  * @param block
  *
- * @return
+ * @return the footer of the previous block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -650,7 +706,7 @@ static word_t *find_prev_footer(block_t *block)
  *
  * @param block
  *
- * @return
+ * @return the previous block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -669,7 +725,7 @@ static block_t *find_prev(block_t *block)
  *
  * @param bp
  *
- * @return
+ * @return a pointer to the corresponding block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -686,7 +742,7 @@ static block_t *payload_to_header(void *bp)
  *
  * @param block
  *
- * @return
+ * @return a pointer to the payload of the block
  *
  * @Changelog
  * - Provided Function at Init.
@@ -697,13 +753,84 @@ static void *header_to_payload(block_t *block)
 }
 
 
-/*
- * <what does your heap checker do?>
- * Please keep modularity in mind when you're writing the heap checker!
+/**
+ * @brief checks the heap for all invariants as shown in the changelog.
+ *
+ * @param line the line number of the caller
+ *
+ * @return true if no invariants are violated, false otherwise
+ *
+ * @Changelog
+ * - Provided Function at Init.
  */
 bool mm_checkheap(int line)
 {
     (void)line; // delete this line; it's a placeholder so that the compiler
                 // will not warn you about an unused variable.
+
+    for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
+        block_t * prev = find_prev(b);
+        block_t * next = find_next(b);
+
+//        bool b_alloc = get_alloc(b);
+        bool prev_alloc;
+        if(prev == heap_start) { // check edge case where previous block is prologue
+            prev_alloc = true;
+        } else {
+            prev_alloc = get_alloc(prev);
+        }
+        bool next_alloc = get_alloc(next);
+
+        // Check that Coalesce works as intended
+        if (get_alloc(b) == false) {
+            if (prev_alloc == false || next_alloc == false) {
+                printf(BOLD RED"Coalesce Invariant failed at line %d with heap:\n"RESET, line);
+                printHeap();
+                return false;
+            }
+        }
+    }
+
     return true;
+}
+
+/**
+ * @brief prints the heap
+ *
+ * @return true if printed successfully (allows for use inside of assert)
+ *
+ * @Changelog
+ * - Created during Coalesce Phase for debugging use.
+ */
+bool printHeap() {
+/*
+ * Include color codes to copy over print heap for debugging student code.
+ *
+ * #define RED     "\033[0;31m"
+ * #define BLUE    "\033[0;34m"
+ * #define BOLD    "\033[1m"
+ * #define RESET   "\033[0m"
+ *
+ */
+
+    int count = 1;
+
+    for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
+        bool alloc = get_alloc(b);
+
+        char *alloc_status = alloc ? RED"ALLOC"RESET : BLUE"FREE"RESET;
+        printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \tsize: %lu",
+               count, b, alloc_status, get_size(b));
+        if (alloc) {
+            printf("\n");
+        }
+        else {
+            printf("\n");
+    //		printf(BLUE"\tprev: %p\tnext: %p\n"RESET, b->prev, b->next);
+        }
+        count++;
+    }
+    printf(BOLD"END HEAP\n\n"RESET);
+
+    return true; // return true to allow for use in dbg macros
 }
