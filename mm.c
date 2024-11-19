@@ -12,6 +12,7 @@
  *                                                                            *
  *                           Implemented Features:                            *
  *                                  Coalesce                                  *
+ *                             Explicit Free List                             *
  *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
@@ -66,7 +67,7 @@
  * Debugging macros, with names beginning "dbg_" are allowed.
  * You may not define any other macros having arguments.
  */
- #define DEBUG // *** uncomment this line to enable debugging ***
+// #define DEBUG // *** uncomment this line to enable debugging ***
 
 #ifdef DEBUG
 /* When debugging is enabled, these form aliases to useful functions */
@@ -117,7 +118,8 @@ typedef struct block
 
 /* Global variables */
 /* Pointer to first block */
-static block_t *heap_start = NULL;
+static block_t *heap_start = NULL; // Pointer to the first block in the heap
+static block_t *free_list_head = NULL; // Pointer to the first block in the explicit free list
 
 
 /* Function prototypes for internal helper routines */
@@ -147,8 +149,11 @@ static block_t *find_next(block_t *block);
 static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
 
+static void list_insert(block_t *block);
+static void list_remove(block_t *block);
+
 bool mm_checkheap(int lineno);
-bool printHeap();
+bool print_heap();
 
 
 /**
@@ -159,6 +164,7 @@ bool printHeap();
  */
 bool mm_init(void) 
 {
+    free_list_head = NULL; // set free list head to NULL for edge case in the code
     // Create the initial empty heap 
     word_t *start = (word_t *)(mem_sbrk(2*wsize));
 
@@ -189,7 +195,7 @@ bool mm_init(void)
 void *malloc(size_t size) 
 {
     dbg_printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
-    dbg_ensures(printHeap());
+    dbg_ensures(print_heap());
 
     dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
@@ -242,7 +248,7 @@ void *malloc(size_t size)
 void free(void *bp)
 {
     dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
-    dbg_ensures(printHeap());
+    dbg_ensures(print_heap());
 
     if (bp == NULL)
     {
@@ -256,7 +262,6 @@ void free(void *bp)
     write_footer(block, size, false);
 
     coalesce(block);
-
 }
 
 /**
@@ -378,7 +383,8 @@ static block_t *extend_heap(size_t size)
  * @return the resulting block
  *
  * @Changelog
- * - Provided Function at Init.
+ * - Provided Function at Init.  Added functionality to it.
+ * - Added explicit free list insert and remove.
  */
 static block_t *coalesce(block_t * block) 
 {
@@ -387,16 +393,13 @@ static block_t *coalesce(block_t * block)
 
     size_t block_size = get_size(block);
 
-    bool prev_alloc;
-    if(prev_block == block) { // check edge case where previous block is prologue
-        prev_alloc = true;
-    } else {
-        prev_alloc = get_alloc(prev_block);
-    }
+     // check edge case where previous block is prologue
+    bool prev_alloc = prev_block == block ? true : get_alloc(prev_block);
     bool next_alloc = get_alloc(next_block);
 
     // case 1
     if(prev_alloc && next_alloc) {
+        list_insert(block);
         return block;
     }
 
@@ -405,10 +408,12 @@ static block_t *coalesce(block_t * block)
     // case 2
     if(prev_alloc && !next_alloc) {
         block_size += next_size;
+        list_remove(next_block);
 
         write_header(block, block_size, false);
         write_footer(block, block_size, false);
 
+        list_insert(block);
         return block;
     }
 
@@ -421,11 +426,14 @@ static block_t *coalesce(block_t * block)
     // case 4
     else {
         block_size += prev_size + next_size;
+        list_remove(next_block);
     }
+    list_remove(prev_block);
 
     write_header(prev_block, block_size, false);
     write_footer(prev_block, block_size, false);
 
+    list_insert(prev_block);
     return prev_block;
 }
 
@@ -438,6 +446,7 @@ static block_t *coalesce(block_t * block)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added explicit free list insert and remove.
  */
 static void place(block_t *block, size_t asize)
 {
@@ -448,16 +457,18 @@ static void place(block_t *block, size_t asize)
         block_t *block_next;
         write_header(block, asize, true);
         write_footer(block, asize, true);
+        list_remove(block);
 
         block_next = find_next(block);
         write_header(block_next, csize-asize, false);
         write_footer(block_next, csize-asize, false);
+        list_insert(block_next);
     }
-
     else
     { 
         write_header(block, csize, true);
         write_footer(block, csize, true);
+        list_remove(block);
     }
 }
 
@@ -470,20 +481,18 @@ static void place(block_t *block, size_t asize)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Changed to find first block in the explicit free list.
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block;
+    block_t *block = free_list_head;
 
-    for (block = heap_start; get_size(block) > 0;
-                             block = find_next(block))
-    {
-
-        if (!(get_alloc(block)) && (asize <= get_size(block)))
-        {
+    for(; block != NULL; block = block->next) {
+        if(asize <= get_size(block)) {
             return block;
         }
     }
+
     return NULL; // no fit found
 }
 
@@ -660,6 +669,37 @@ static void write_footer(block_t *block, size_t size, bool alloc)
     *footerp = pack(size, alloc);
 }
 
+/**
+ * @brief given a payload pointer, returns a pointer to the
+ *        corresponding block.
+ *
+ * @param bp
+ *
+ * @return a pointer to the corresponding block
+ *
+ * @Changelog
+ * - Provided Function at Init.
+ */
+static block_t *payload_to_header(void *bp)
+{
+    return (block_t *)(((char *)bp) - offsetof(block_t, payload));
+}
+
+/**
+ * @brief given a block pointer, returns a pointer to the
+ *        corresponding payload.
+ *
+ * @param block
+ *
+ * @return a pointer to the payload of the block
+ *
+ * @Changelog
+ * - Provided Function at Init.
+ */
+static void *header_to_payload(block_t *block)
+{
+    return (void *)(block->payload);
+}
 
 /**
  * @brief returns the next consecutive block on the heap by adding the
@@ -718,39 +758,60 @@ static block_t *find_prev(block_t *block)
     return (block_t *)((char *)block - size);
 }
 
-
 /**
- * @brief given a payload pointer, returns a pointer to the
- *        corresponding block.
+ * @brief insert the block at the beginning of the free list
  *
- * @param bp
+ * @param block the block to be inserted
  *
- * @return a pointer to the corresponding block
- *
- * @Changelog
- * - Provided Function at Init.
+ * @ChangeLog
+ * - Added Function for Explicit Free List.
  */
-static block_t *payload_to_header(void *bp)
-{
-    return (block_t *)(((char *)bp) - offsetof(block_t, payload));
+static void list_insert(block_t *block) {
+
+    // empty free list
+    if(free_list_head == NULL) {
+        block->prev = NULL;
+        block->next = NULL;
+        free_list_head = block;
+    }
+    // at least one item in the free list
+    else {
+        block->prev = NULL;
+        block->next = free_list_head;
+        free_list_head->prev = block;
+        free_list_head = block;
+    }
 }
 
-
 /**
- * @brief given a block pointer, returns a pointer to the
- *        corresponding payload.
+ * @brief remove the block from the free list
  *
- * @param block
+ * @param block the block to be removed
  *
- * @return a pointer to the payload of the block
- *
- * @Changelog
- * - Provided Function at Init.
+ * @ChangeLog
+ * - Added Function for Explicit Free List.
  */
-static void *header_to_payload(block_t *block)
-{
-    return (void *)(block->payload);
+static void list_remove(block_t *block) {
+
+    block_t *prev_block = block->prev;
+    block_t *next_block = block->next;
+
+    if(prev_block == NULL && next_block == NULL) {
+        free_list_head = NULL;
+    }
+    else if(prev_block == NULL) {
+        next_block->prev = NULL;
+        free_list_head = next_block;
+    }
+    else if(next_block == NULL) {
+        prev_block->next = NULL;
+    }
+    else {
+        prev_block->next = next_block;
+        next_block->prev = prev_block;
+    }
 }
+
 
 
 /**
@@ -761,18 +822,22 @@ static void *header_to_payload(block_t *block)
  * @return true if no invariants are violated, false otherwise
  *
  * @Changelog
- * - Provided Function at Init.
+ * - Provided Function at Init.  Added Coalesce Invariant -- 1.
+ * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
  */
 bool mm_checkheap(int line)
 {
-    (void)line; // delete this line; it's a placeholder so that the compiler
-                // will not warn you about an unused variable.
 
-    for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
+    int free_list_count = 0;
+    int heap_count = 0;
+
+    block_t *b;
+    // loop through the heap for all invariants requiring the entire heap
+    for (b = heap_start; get_size(b) != 0; b = find_next(b)) {
         block_t * prev = find_prev(b);
         block_t * next = find_next(b);
 
-//        bool b_alloc = get_alloc(b);
+        bool b_alloc = get_alloc(b);
         bool prev_alloc;
         if(prev == heap_start) { // check edge case where previous block is prologue
             prev_alloc = true;
@@ -782,14 +847,54 @@ bool mm_checkheap(int line)
         bool next_alloc = get_alloc(next);
 
         // Check that Coalesce works as intended
-        if (get_alloc(b) == false) {
+        if (b_alloc == false) {
+            heap_count++; // increment count of free blocks in the heap
+
             if (prev_alloc == false || next_alloc == false) {
                 printf(BOLD RED"Coalesce Invariant failed at line %d with heap:\n"RESET, line);
-                printHeap();
-                return false;
+                print_heap();
+                return false; // INVARIANT 1
             }
         }
     }
+
+    // loop through the free list for all invariants requiring the free list
+    block_t *f_block;
+    for (f_block = free_list_head; f_block != NULL; f_block = f_block->next) {
+        free_list_count++; // increment count of free list blocks
+
+        // Check that the free list block is actually free
+        if (get_alloc(f_block)) {
+            printf(BOLD RED"Allocated Block in Free List Invariant Broken at line %d with heap:\n"RESET, line);
+            print_heap();
+            return false; // INVARIANT 2
+        }
+
+        // Check that the free list is doubly linked
+        if (f_block->next != NULL && f_block->next->prev != f_block) {
+            printf(BOLD RED"Free List Not Doubly Linked Invariant Broken at line %d with heap:\n"RESET, line);
+            print_heap();
+            return false; // INVARIANT 3
+        }
+
+        if(free_list_count > 1000000000) {
+            printf(BOLD RED"Free List in an Infinite Loop at line %d with heap:\n"RESET, line);
+            print_heap();
+            return false; // INVARIANT 5
+        }
+
+    }
+
+
+
+     // Check that the number of free blocks in the heap
+     // is equal to the number of free blocks in the free list.
+    if (free_list_count != heap_count) {
+        printf(BOLD RED"Free List Has All Free Blocks Invariant failed at line %d with heap:\n"RESET, line);
+        print_heap();
+        return false; // INVARIANT 4
+    }
+
 
     return true;
 }
@@ -802,7 +907,7 @@ bool mm_checkheap(int line)
  * @Changelog
  * - Created during Coalesce Phase for debugging use.
  */
-bool printHeap() {
+bool print_heap() {
 /*
  * Include color codes to copy over print heap for debugging student code.
  *
@@ -825,8 +930,7 @@ bool printHeap() {
             printf("\n");
         }
         else {
-            printf("\n");
-    //		printf(BLUE"\tprev: %p\tnext: %p\n"RESET, b->prev, b->next);
+    		printf(BLUE"\tprev: %p\tnext: %p\n"RESET, b->prev, b->next);
         }
         count++;
     }
