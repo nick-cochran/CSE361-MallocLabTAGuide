@@ -14,6 +14,7 @@
  *                                  Coalesce                                  *
  *                             Explicit Free List                             *
  *                                   Nth Fit                                  *
+ *                               Remove Footers                               *
  *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
@@ -92,6 +93,7 @@ static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
+static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
 static const int N = 5; // N for Nth fit
@@ -135,7 +137,7 @@ static block_t *coalesce(block_t *block);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool alloc);
+static word_t pack(size_t size, bool alloc, bool prev_alloc);
 
 static size_t extract_size(word_t word);
 static size_t get_size(block_t *block);
@@ -143,9 +145,11 @@ static size_t get_payload_size(block_t *block);
 
 static bool extract_alloc(word_t word);
 static bool get_alloc(block_t *block);
+static bool get_prev_alloc(block_t *block);
 
-static void write_header(block_t *block, size_t size, bool alloc);
-static void write_footer(block_t *block, size_t size, bool alloc);
+static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc);
+static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc);
+static void update_next_prev_alloc(block_t *block, bool prev_alloc);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -166,6 +170,8 @@ bool print_heap();
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added explicit free list head to NULL. (previous commit -- whoops)
+ * - Added prev_alloc functionality for Remove Footers.
  */
 bool mm_init(void) 
 {
@@ -178,8 +184,8 @@ bool mm_init(void)
         return false;
     }
 
-    start[0] = pack(0, true); // Prologue footer
-    start[1] = pack(0, true); // Epilogue header
+    start[0] = pack(0, true, true); // Prologue footer
+    start[1] = pack(0, true, true); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *) &(start[1]);
 
@@ -196,6 +202,7 @@ bool mm_init(void)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Updated to utilize space with Remove Footers.
  */
 void *malloc(size_t size) 
 {
@@ -220,7 +227,11 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + dsize, dsize);
+    asize = round_up(size + wsize, dsize);
+    // ensure that asize does not roundup to less than min_block_size
+    if(asize < min_block_size) {
+        asize = min_block_size;
+    }
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -249,6 +260,7 @@ void *malloc(size_t size)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Updated to work better with Remove Footers.
  */
 void free(void *bp)
 {
@@ -261,12 +273,9 @@ void free(void *bp)
     }
 
     block_t *block = payload_to_header(bp);
-    size_t size = get_size(block);
 
-    write_header(block, size, false);
-    write_footer(block, size, false);
+    update_next_prev_alloc(coalesce(block), false);
 
-    coalesce(block);
 }
 
 /**
@@ -356,6 +365,7 @@ void *calloc(size_t elements, size_t size)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added prev_alloc functionality for Remove Footers.
  */
 static block_t *extend_heap(size_t size) 
 {
@@ -370,11 +380,13 @@ static block_t *extend_heap(size_t size)
     
     // Initialize free block header/footer 
     block_t *block = payload_to_header(bp);
-    write_header(block, size, false);
-    write_footer(block, size, false);
+    // use the fact that this is where the epilogue used to be to get the previous block's alloc status
+    bool epilogue_prev_alloc = get_prev_alloc(block);
+    write_header(block, size, false, epilogue_prev_alloc);
+    write_footer(block, size, false, epilogue_prev_alloc);
     // Create new epilogue header
     block_t *block_next = find_next(block);
-    write_header(block_next, 0, true);
+    write_header(block_next, 0, true, false);
 
     // Coalesce in case the previous block was free
     return coalesce(block);
@@ -390,20 +402,22 @@ static block_t *extend_heap(size_t size)
  * @Changelog
  * - Provided Function at Init.  Added functionality to it.
  * - Added explicit free list insert and remove.
+ * - Added prev_alloc functionality for Remove Footers.
  */
 static block_t *coalesce(block_t * block) 
 {
-    block_t *prev_block = find_prev(block);
     block_t *next_block = find_next(block);
 
     size_t block_size = get_size(block);
 
      // check edge case where previous block is prologue
-    bool prev_alloc = prev_block == block ? true : get_alloc(prev_block);
+    bool prev_alloc = get_prev_alloc(block);
     bool next_alloc = get_alloc(next_block);
 
     // case 1
     if(prev_alloc && next_alloc) {
+        write_header(block, block_size, false, prev_alloc);
+        write_footer(block, block_size, false, prev_alloc);
         list_insert(block);
         return block;
     }
@@ -415,13 +429,15 @@ static block_t *coalesce(block_t * block)
         block_size += next_size;
         list_remove(next_block);
 
-        write_header(block, block_size, false);
-        write_footer(block, block_size, false);
+        write_header(block, block_size, false, prev_alloc);
+        write_footer(block, block_size, false, prev_alloc);
 
         list_insert(block);
         return block;
     }
 
+    block_t *prev_block = find_prev(block);
+    bool prev_prev_alloc = get_prev_alloc(prev_block);
     size_t prev_size = get_size(prev_block);
 
     // case 3
@@ -435,8 +451,8 @@ static block_t *coalesce(block_t * block)
     }
     list_remove(prev_block);
 
-    write_header(prev_block, block_size, false);
-    write_footer(prev_block, block_size, false);
+    write_header(prev_block, block_size, false, prev_prev_alloc);
+    write_footer(prev_block, block_size, false, prev_prev_alloc);
 
     list_insert(prev_block);
     return prev_block;
@@ -452,27 +468,30 @@ static block_t *coalesce(block_t * block)
  * @Changelog
  * - Provided Function at Init.
  * - Added explicit free list insert and remove.
+ * - Added prev_alloc functionality for Remove Footers.
  */
 static void place(block_t *block, size_t asize)
 {
     size_t csize = get_size(block);
+    bool prev_alloc = get_prev_alloc(block);
 
     if ((csize - asize) >= min_block_size)
     {
         block_t *block_next;
-        write_header(block, asize, true);
-        write_footer(block, asize, true);
+        write_header(block, asize, true, prev_alloc);
         list_remove(block);
 
         block_next = find_next(block);
-        write_header(block_next, csize-asize, false);
-        write_footer(block_next, csize-asize, false);
+        prev_alloc = true; // set prev_alloc to true since we just allocated the previous block
+        write_header(block_next, csize-asize, false, prev_alloc);
+        write_footer(block_next, csize-asize, false, prev_alloc);
+        update_next_prev_alloc(block_next, false);
         list_insert(block_next);
     }
     else
     { 
-        write_header(block, csize, true);
-        write_footer(block, csize, true);
+        write_header(block, csize, true, prev_alloc);
+        update_next_prev_alloc(block, true);
         list_remove(block);
     }
 }
@@ -534,7 +553,7 @@ static block_t *find_fit(size_t asize)
         }
     }
 
-    return best_block; // no fit found
+    return best_block; // NULL if no block found
 }
 
 /**
@@ -582,10 +601,12 @@ static size_t round_up(size_t size, size_t n)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added prev_alloc parameter for Remove Footers.
  */
-static word_t pack(size_t size, bool alloc)
+static word_t pack(size_t size, bool alloc, bool prev_alloc)
 {
-    return alloc ? (size | alloc_mask) : size;
+    return alloc ? (prev_alloc ? (size | alloc_mask | prev_alloc_mask) : (size | alloc_mask))
+                    : (prev_alloc ? (size | prev_alloc_mask) : size);
 }
 
 
@@ -637,7 +658,7 @@ static size_t get_size(block_t *block)
 static size_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    return asize - dsize;
+    return asize - wsize;
 }
 
 
@@ -674,6 +695,20 @@ static bool get_alloc(block_t *block)
     return extract_alloc(block->header);
 }
 
+/**
+ * @brief returns the previous allocation status of a given block using it's header.
+ *
+ * @param block the block to get the prev_alloc bit from.
+ *
+ * @return true if the previous block is allocated, false otherwise.
+ *
+ * @Changelog
+ * - Added function for Remove Footers.
+ */
+static bool get_prev_alloc(block_t *block)
+{
+    return (bool)(block->header & prev_alloc_mask);
+}
 
 /**
  * @brief given a block and its size and allocation status,
@@ -685,10 +720,11 @@ static bool get_alloc(block_t *block)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added prev_alloc parameter for Remove Footers.
  */
-static void write_header(block_t *block, size_t size, bool alloc)
+static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
-    block->header = pack(size, alloc);
+    block->header = pack(size, alloc, prev_alloc);
 }
 
 
@@ -703,11 +739,25 @@ static void write_header(block_t *block, size_t size, bool alloc)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Added prev_alloc parameter for Remove Footers.
  */
-static void write_footer(block_t *block, size_t size, bool alloc)
+static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
-    *footerp = pack(size, alloc);
+    *footerp = pack(size, alloc, prev_alloc);
+}
+
+/**
+ * @brief given a block, updates the next block's previous allocation status
+ *
+ * @param block the block which has changed allocation status
+ *
+ * @Changelog
+ * - Added Function for Remove Footers.
+ */
+static void update_next_prev_alloc(block_t *block, bool prev_alloc) {
+    block_t *next_block = find_next(block);
+    write_header(next_block, get_size(next_block), get_alloc(next_block), prev_alloc);
 }
 
 /**
@@ -865,6 +915,7 @@ static void list_remove(block_t *block) {
  * @Changelog
  * - Provided Function at Init.  Added Coalesce Invariant -- 1.
  * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
+ * - Added Remove Footers Invariants -- 6, 7.
  */
 bool mm_checkheap(int line)
 {
@@ -875,27 +926,33 @@ bool mm_checkheap(int line)
     block_t *b;
     // loop through the heap for all invariants requiring the entire heap
     for (b = heap_start; get_size(b) != 0; b = find_next(b)) {
-        block_t * prev = find_prev(b);
         block_t * next = find_next(b);
 
         bool b_alloc = get_alloc(b);
-        bool prev_alloc;
-        if(prev == heap_start) { // check edge case where previous block is prologue
-            prev_alloc = true;
-        } else {
-            prev_alloc = get_alloc(prev);
-        }
+        bool prev_alloc = get_prev_alloc(b);
         bool next_alloc = get_alloc(next);
 
-        // Check that Coalesce works as intended
         if (b_alloc == false) {
             heap_count++; // increment count of free blocks in the heap
 
+            // Check that Coalesce works as intended
             if (prev_alloc == false || next_alloc == false) {
                 printf(BOLD RED"Coalesce Invariant failed at line %d with heap:\n"RESET, line);
                 print_heap();
                 return false; // INVARIANT 1
             }
+
+            if (b->header != *find_prev_footer(next)) {
+                printf(BOLD RED"Footer Not Matching Header Invariant Broken at line %d with heap:\n"RESET, line);
+                print_heap();
+                return false; // INVARIANT 6
+            }
+        }
+
+        if(b_alloc != get_prev_alloc(next)) {
+            printf(BOLD RED"Incorrect Prev Alloc Bit Invariant Broken at line %d with heap:\n"RESET, line);
+            print_heap();
+            return false; // INVARIANT 7
         }
     }
 
@@ -918,7 +975,8 @@ bool mm_checkheap(int line)
             return false; // INVARIANT 3
         }
 
-        if(free_list_count > 1000000000) {
+        const int too_large_number = 1000000000;
+        if(free_list_count > too_large_number) {
             printf(BOLD RED"Free List in an Infinite Loop at line %d with heap:\n"RESET, line);
             print_heap();
             return false; // INVARIANT 5
@@ -954,6 +1012,8 @@ bool print_heap() {
  *
  * #define RED     "\033[0;31m"
  * #define BLUE    "\033[0;34m"
+ * #define MAGENTA "\033[0;35m"
+ * #define CYAN    "\033[0;36m"
  * #define BOLD    "\033[1m"
  * #define RESET   "\033[0m"
  *
@@ -965,8 +1025,9 @@ bool print_heap() {
         bool alloc = get_alloc(b);
 
         char *alloc_status = alloc ? RED"ALLOC"RESET : BLUE"FREE"RESET;
-        printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \tsize: %lu",
-               count, b, alloc_status, get_size(b));
+        char *prev_alloc_status = get_prev_alloc(b) ? MAGENTA"ALLOC"RESET : CYAN"FREE"RESET;
+        printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \talloc: %s, \tsize: %lu",
+               count, b, alloc_status, prev_alloc_status, get_size(b));
         if (alloc) {
             printf("\n");
         }

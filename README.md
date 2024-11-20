@@ -1,3 +1,35 @@
+# CSE361S Malloc Lab TA Solution Guide
+
+### Author: Nick Cochran
+### Email: c.nick@wustl.edu
+
+## Note to Future TAs and Head TAs
+
+Feel free to use this repo to help you in any way you see fit.
+
+If you use this repo to create a new, better one (as I know I am not perfect),
+    please still give me credit for the original work.
+
+If you ever would like something added/modified, let me know and I will do my best to make that happen.
+
+## Description
+
+This repository serves as an easy way for TAs to reference code for each of the malloc lab implementations.
+
+- Every commit is a new implementation for the malloc lab.
+- The commit message details which implementation the commit is for.
+- Each function also has a changelog section detailing when changes have been made to that function.
+    - This is meant to help identify which functions need to be changed for each implementation.
+    - I did not flawlessly update the changelog for every change, but I did my best to keep it up to date.
+- Ideally, if you would like,
+    you can copy any of these functions to test with student code if further debugging is required.
+
+#### Below is the original README for the Malloc Lab.
+
+---
+
+
+
 #############################
 # CS:APP Malloc Lab
 # Handout files for students
