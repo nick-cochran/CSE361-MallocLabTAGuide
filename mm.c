@@ -13,6 +13,7 @@
  *                           Implemented Features:                            *
  *                                  Coalesce                                  *
  *                             Explicit Free List                             *
+ *                                   Nth Fit                                  *
  *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
@@ -92,6 +93,10 @@ static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
 static const word_t size_mask = ~(word_t)0xF;
+
+static const int N = 5; // N for Nth fit
+static const size_t min_moe_size = 256;
+static const size_t max_size = ~0x0;
 
 typedef struct block
 {
@@ -482,18 +487,54 @@ static void place(block_t *block, size_t asize)
  * @Changelog
  * - Provided Function at Init.
  * - Changed to find first block in the explicit free list.
+ * - Changed to Nth fit algorithm with explicit free list.
  */
 static block_t *find_fit(size_t asize)
 {
-    block_t *block = free_list_head;
+    if(free_list_head == NULL) {
+        return NULL; // if free list is empty, just return NULL immediately
+    }
 
+    const int moe_divider = 20;
+    size_t perf_block_size;
+    // create a margin of error of what the perfect block size is
+    // In theory this would be an improvement, but in testing it's unclear
+    // otherwise just have it check that block_size is == to asize and finish loop there
+    if(asize >= min_moe_size) {
+        perf_block_size = asize + round_up(asize/moe_divider, dsize);
+    } else {
+        perf_block_size = asize;
+    }
+
+    int blocks_found = 0;
+    block_t *best_block = NULL;
+    size_t best_block_size = max_size; // set to max size (unsigned ~0x0) to compare with first
+
+    block_t *block = free_list_head;
     for(; block != NULL; block = block->next) {
-        if(asize <= get_size(block)) {
-            return block;
+
+        size_t block_size = get_size(block);
+        if(asize <= block_size) {
+            blocks_found++;
+
+            // check if block size is the best possible option and return immediately if so
+            if(block_size <= perf_block_size) {
+                return block;
+            }
+
+            if(block_size < best_block_size) {
+                best_block = block;
+                best_block_size = block_size;
+            }
+        }
+
+        // end the loop if we have found N blocks that fit
+        if(blocks_found >= N) {
+            break;
         }
     }
 
-    return NULL; // no fit found
+    return best_block; // no fit found
 }
 
 /**
