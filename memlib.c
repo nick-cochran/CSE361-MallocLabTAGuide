@@ -98,10 +98,10 @@ void *mem_sbrk(intptr_t incr) {
         fprintf(stderr, "ERROR: mem_sbrk failed. Ran out of memory.  Would require heap size of %zd (0x%zx) bytes\n", alloc, alloc);
     }
     // Comment out next 4 lines for running on Mac
-//     else if (sbrk(incr) == (void*) -1) {
-//        ok = false;
-//        fprintf(stderr, "ERROR: mem_sbrk failed.  Could not allocate more heap space\n");
-//    }
+     else if (sbrk(incr) == (void*) -1) {
+        ok = false;
+        fprintf(stderr, "ERROR: mem_sbrk failed.  Could not allocate more heap space\n");
+    }
     if (ok) {
         mem_brk += incr;
         return (void *) old_brk;

@@ -15,6 +15,7 @@
  *                             Explicit Free List                             *
  *                                   Nth Fit                                  *
  *                               Remove Footers                               *
+ *                              Segregated Lists                              *
  *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
@@ -96,13 +97,20 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int N = 5; // N for Nth fit
+static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~75
 static const size_t min_moe_size = 256;
 static const size_t max_size = ~0x0;
 
+static const int char_bits = 8; // 8 bits in 1 byte
+static const int num_bits_word_t = sizeof(word_t) * char_bits; // number of bytes in word_t * 8 = number of bits
+static const int log2_min_block_size = 4; // log2(16) = 4 --> min_block_size isn't 16 yet but will be soon
+static const int last_list_index = 9;
+static const int seg_list_count = 10;
+
+
 typedef struct block
 {
-    /* Header contains size + allocation flag */
+    // header: size + allocation flag + previous block allocation flag
     word_t header;
     union {
         struct {
@@ -124,9 +132,13 @@ typedef struct block
 
 
 /* Global variables */
+
 /* Pointer to first block */
 static block_t *heap_start = NULL; // Pointer to the first block in the heap
-static block_t *free_list_head = NULL; // Pointer to the first block in the explicit free list
+// Segregated Free List Headers
+static block_t *seg_lists[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+// Segregated Free List Min Sizes -- used only for printing/debugging
+static const size_t seg_list_sizes[] = {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192};
 
 
 /* Function prototypes for internal helper routines */
@@ -161,8 +173,11 @@ static block_t *find_prev(block_t *block);
 static void list_insert(block_t *block);
 static void list_remove(block_t *block);
 
+static int find_seg_list_index(size_t asize);
+
 bool mm_checkheap(int lineno);
 bool print_heap();
+bool print_seg_lists();
 
 
 /**
@@ -172,10 +187,15 @@ bool print_heap();
  * - Provided Function at Init.
  * - Added explicit free list head to NULL. (previous commit -- whoops)
  * - Added prev_alloc functionality for Remove Footers.
+ * - Added Seg List Initialization.
  */
 bool mm_init(void) 
 {
-    free_list_head = NULL; // set free list head to NULL for edge case in the code
+    // set seg list heads to NULL for when the code resets
+    for(int i = 0; i < seg_list_count; i++) {
+        seg_lists[i] = NULL;
+    }
+
     // Create the initial empty heap 
     word_t *start = (word_t *)(mem_sbrk(2*wsize));
 
@@ -208,6 +228,7 @@ void *malloc(size_t size)
 {
     dbg_printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
     dbg_ensures(print_heap());
+    dbg_ensures(print_seg_lists());
 
     dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
@@ -266,6 +287,7 @@ void free(void *bp)
 {
     dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
     dbg_ensures(print_heap());
+    dbg_ensures(print_seg_lists());
 
     if (bp == NULL)
     {
@@ -437,7 +459,10 @@ static block_t *coalesce(block_t * block)
     }
 
     block_t *prev_block = find_prev(block);
-    bool prev_prev_alloc = get_prev_alloc(prev_block);
+
+     // note realized later -->
+     // this can be set to true since it cannot be a free block before another free block
+    bool prev_prev_alloc = true; // instead of: get_prev_alloc(prev_block);
     size_t prev_size = get_size(prev_block);
 
     // case 3
@@ -469,6 +494,7 @@ static block_t *coalesce(block_t * block)
  * - Provided Function at Init.
  * - Added explicit free list insert and remove.
  * - Added prev_alloc functionality for Remove Footers.
+ * - Slightly modified to work correctly with Segregated Lists.
  */
 static void place(block_t *block, size_t asize)
 {
@@ -478,8 +504,8 @@ static void place(block_t *block, size_t asize)
     if ((csize - asize) >= min_block_size)
     {
         block_t *block_next;
-        write_header(block, asize, true, prev_alloc);
         list_remove(block);
+        write_header(block, asize, true, prev_alloc);
 
         block_next = find_next(block);
         prev_alloc = true; // set prev_alloc to true since we just allocated the previous block
@@ -490,9 +516,9 @@ static void place(block_t *block, size_t asize)
     }
     else
     { 
+        list_remove(block);
         write_header(block, csize, true, prev_alloc);
         update_next_prev_alloc(block, true);
-        list_remove(block);
     }
 }
 
@@ -507,12 +533,11 @@ static void place(block_t *block, size_t asize)
  * - Provided Function at Init.
  * - Changed to find first block in the explicit free list.
  * - Changed to Nth fit algorithm with explicit free list.
+ * - Changed to Nth fit with Segregated Free Lists.
  */
 static block_t *find_fit(size_t asize)
 {
-    if(free_list_head == NULL) {
-        return NULL; // if free list is empty, just return NULL immediately
-    }
+    int list_index = find_seg_list_index(asize);
 
     const int moe_divider = 20;
     size_t perf_block_size;
@@ -525,30 +550,44 @@ static block_t *find_fit(size_t asize)
         perf_block_size = asize;
     }
 
+    // set up vars for Nth fit
     int blocks_found = 0;
     block_t *best_block = NULL;
     size_t best_block_size = max_size; // set to max size (unsigned ~0x0) to compare with first
 
-    block_t *block = free_list_head;
-    for(; block != NULL; block = block->next) {
+    int i = list_index;
+    for(; i < seg_list_count; i++) { // loop through seg lists
 
-        size_t block_size = get_size(block);
-        if(asize <= block_size) {
-            blocks_found++;
+        block_t *block = seg_lists[i];
+        if(block == NULL) { // if seg list is empty, move to next list
+            continue;
+        }
 
-            // check if block size is the best possible option and return immediately if so
-            if(block_size <= perf_block_size) {
-                return block;
+        for(; block != NULL; block = block->next) { // loop through seg list
+
+            size_t block_size = get_size(block);
+            if(asize <= block_size) {
+                blocks_found++;
+
+                // check if block size is the best possible option and return immediately if so
+                if(block_size <= perf_block_size) {
+                    return block;
+                }
+
+                if(block_size < best_block_size) {
+                    best_block = block;
+                    best_block_size = block_size;
+                }
             }
 
-            if(block_size < best_block_size) {
-                best_block = block;
-                best_block_size = block_size;
+            // end the loop if we have found N blocks that fit
+            if(blocks_found >= N) {
+                return best_block;
             }
         }
 
-        // end the loop if we have found N blocks that fit
-        if(blocks_found >= N) {
+        // if we have found something that fits, don't search the rest of the lists
+        if(blocks_found > 0) {
             break;
         }
     }
@@ -654,6 +693,7 @@ static size_t get_size(block_t *block)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Changed in remove footer. (added changelog in a later commit)
  */
 static size_t get_payload_size(block_t *block)
 {
@@ -850,49 +890,55 @@ static block_t *find_prev(block_t *block)
 }
 
 /**
- * @brief insert the block at the beginning of the free list
+ * @brief insert the block at the beginning of the correct seg list
  *
  * @param block the block to be inserted
  *
  * @ChangeLog
  * - Added Function for Explicit Free List.
+ * - Modified for Segregated Free Lists.
  */
 static void list_insert(block_t *block) {
 
+    int list_index = find_seg_list_index(get_size(block));
+    block_t *list_head = seg_lists[list_index];
+
     // empty free list
-    if(free_list_head == NULL) {
+    if(list_head == NULL) {
         block->prev = NULL;
         block->next = NULL;
-        free_list_head = block;
     }
     // at least one item in the free list
     else {
         block->prev = NULL;
-        block->next = free_list_head;
-        free_list_head->prev = block;
-        free_list_head = block;
+        block->next = list_head;
+        list_head->prev = block;
     }
+    seg_lists[list_index] = block;
 }
 
 /**
- * @brief remove the block from the free list
+ * @brief remove the block from the correct seg list
  *
  * @param block the block to be removed
  *
  * @ChangeLog
  * - Added Function for Explicit Free List.
+ * - Modified for Segregated Free Lists.
  */
 static void list_remove(block_t *block) {
+
+    int list_index = find_seg_list_index(get_size(block));
 
     block_t *prev_block = block->prev;
     block_t *next_block = block->next;
 
     if(prev_block == NULL && next_block == NULL) {
-        free_list_head = NULL;
+        seg_lists[list_index] = NULL;
     }
     else if(prev_block == NULL) {
         next_block->prev = NULL;
-        free_list_head = next_block;
+        seg_lists[list_index] = next_block;
     }
     else if(next_block == NULL) {
         prev_block->next = NULL;
@@ -901,6 +947,30 @@ static void list_remove(block_t *block) {
         prev_block->next = next_block;
         next_block->prev = prev_block;
     }
+}
+
+/**
+ * @brief Uses __builtin_clzll to find the index of the seg list for a block of the given size.
+ *
+ * @param asize the size of the block going in the free lists
+ *
+ * @return the index of the correct seg list
+ *
+ * @credit
+ * - Thanks to Andrew Carpenter for the idea and Eric Todd for additional ideas
+ *
+ * @Changelog
+ * - Added for Segregated List Implementation.
+ */
+static int find_seg_list_index(size_t asize) {
+    // returns the number of leading zeros in the binary representation of asize
+    int leading_zeros = __builtin_clzll(asize);
+    // convert to the number of trailing zeros with (num_bits_word_t - leading zeros - 1)
+    int trailing_zeros = num_bits_word_t - leading_zeros - 1;
+    int index = trailing_zeros - log2_min_block_size;  // subtract log2(min_block_size) to start at index 0
+    if (index < 0) index = 0;
+    // return the last index if it is larger than the corresponding size for that index
+    return index <= last_list_index ? index : last_list_index;
 }
 
 
@@ -916,6 +986,7 @@ static void list_remove(block_t *block) {
  * - Provided Function at Init.  Added Coalesce Invariant -- 1.
  * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
  * - Added Remove Footers Invariants -- 6, 7.
+ * - Added Segregated Free List Invariant -- 8.
  */
 bool mm_checkheap(int line)
 {
@@ -956,32 +1027,49 @@ bool mm_checkheap(int line)
         }
     }
 
-    // loop through the free list for all invariants requiring the free list
-    block_t *f_block;
-    for (f_block = free_list_head; f_block != NULL; f_block = f_block->next) {
-        free_list_count++; // increment count of free list blocks
+    // loop through the seg lists for all invariants requiring the seg free lists
+    int list_index = 0;
+    for(; list_index < seg_list_count; list_index++) {
 
-        // Check that the free list block is actually free
-        if (get_alloc(f_block)) {
-            printf(BOLD RED"Allocated Block in Free List Invariant Broken at line %d with heap:\n"RESET, line);
-            print_heap();
-            return false; // INVARIANT 2
+        block_t *f_block = seg_lists[list_index];
+        for(; f_block != NULL; f_block = f_block->next) {
+            free_list_count++; // increment count of free list blocks
+            size_t block_size = get_size(f_block);
+
+            // Check that the free list block is actually free
+            if(get_alloc(f_block)) {
+                printf(BOLD RED"Allocated Block (addr: %p) in Seg List Invariant"
+                               " Broken at line %d with heap:\n"RESET, f_block, line);
+                print_heap();
+                print_seg_lists();
+                return false; // INVARIANT 2
+            }
+
+            // Check that the free list is doubly linked
+            if(f_block->next != NULL && f_block->next->prev != f_block) {
+                printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
+                               " Broken at line %d with heap:\n"RESET, list_index, line);
+                print_heap();
+                return false; // INVARIANT 3
+            }
+
+            // Check that all blocks are in the correct Seg List
+            if(block_size >= seg_list_sizes[list_index]
+                && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1])) {
+                printf(BOLD RED"Block in Wrong Seg List Invariant Broken at line %d with heap:\n"RESET, line);
+                print_heap();
+                print_seg_lists();
+                return false; // INVARIANT 8
+            }
+
+            const int too_large_number = 1000000000;
+            if(free_list_count > too_large_number) {
+                printf(BOLD RED"Free Lists in an Infinite Loop at line %d with heap:\n"RESET, line);
+                print_heap();
+                return false; // INVARIANT 5
+            }
+
         }
-
-        // Check that the free list is doubly linked
-        if (f_block->next != NULL && f_block->next->prev != f_block) {
-            printf(BOLD RED"Free List Not Doubly Linked Invariant Broken at line %d with heap:\n"RESET, line);
-            print_heap();
-            return false; // INVARIANT 3
-        }
-
-        const int too_large_number = 1000000000;
-        if(free_list_count > too_large_number) {
-            printf(BOLD RED"Free List in an Infinite Loop at line %d with heap:\n"RESET, line);
-            print_heap();
-            return false; // INVARIANT 5
-        }
-
     }
 
 
@@ -989,7 +1077,7 @@ bool mm_checkheap(int line)
      // Check that the number of free blocks in the heap
      // is equal to the number of free blocks in the free list.
     if (free_list_count != heap_count) {
-        printf(BOLD RED"Free List Has All Free Blocks Invariant failed at line %d with heap:\n"RESET, line);
+        printf(BOLD RED"Free Lists Doesn't Have All Free Blocks Invariant failed at line %d with heap:\n"RESET, line);
         print_heap();
         return false; // INVARIANT 4
     }
@@ -1026,7 +1114,7 @@ bool print_heap() {
 
         char *alloc_status = alloc ? RED"ALLOC"RESET : BLUE"FREE"RESET;
         char *prev_alloc_status = get_prev_alloc(b) ? MAGENTA"ALLOC"RESET : CYAN"FREE"RESET;
-        printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \talloc: %s, \tsize: %lu",
+        printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \tprev_alloc: %s, \tsize: %lu",
                count, b, alloc_status, prev_alloc_status, get_size(b));
         if (alloc) {
             printf("\n");
@@ -1037,6 +1125,48 @@ bool print_heap() {
         count++;
     }
     printf(BOLD"END HEAP\n\n"RESET);
+
+    return true; // return true to allow for use in dbg macros
+}
+
+/**
+ * @brief prints the segregated free lists
+ *
+ * @return true to allow for use in dbg macros
+ *
+ * @Changelog
+ * - Created for Seg Lists to debug and print the segregated free lists.
+ */
+bool print_seg_lists() {
+/*
+ * Include color codes to copy over print seg lists for debugging student code.
+ *
+ * #define RED     "\033[0;31m"
+ * #define BLUE    "\033[0;34m"
+ * #define MAGENTA "\033[0;35m"
+ * #define CYAN    "\033[0;36m"
+ * #define BOLD    "\033[1m"
+ * #define RESET   "\033[0m"
+ *
+ */
+    int list_index = 0;
+    printf(BOLD"SEGREGATED FREE LISTS\n"RESET);
+    printf(BOLD"------------------------------------------------------------\n"RESET);
+
+    for(; list_index < seg_list_count; list_index++) {
+        printf(BOLD BLUE"SEG LIST %d with min size: %lu\n"RESET, list_index, seg_list_sizes[list_index]);
+
+        block_t *block = seg_lists[list_index];
+        if(block == NULL) {
+            printf(BOLD"Empty Seg List\n"RESET);
+            continue;
+        }
+        int count = 1;
+        for(; block != NULL; block = block->next, count++) {
+            printf(BOLD"Block %d"RESET" with ADDR: %p, \tsize: %lu\n", count, block, get_size(block));
+        }
+    }
+    printf(BOLD"------------------------------------------------------------\n\n"RESET);
 
     return true; // return true to allow for use in dbg macros
 }
