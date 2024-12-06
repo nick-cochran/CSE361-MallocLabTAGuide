@@ -17,6 +17,8 @@ If you ever would like something added/modified, let me know and I will do my be
 This repository serves as an easy way for TAs to reference code for each of the malloc lab implementations.
 
 - Every commit is a new implementation for the malloc lab.
+  - When it comes to later implementations, these are separate branches that are merged into main
+        to make a clean commit history for each implementation.
 - The commit message details which implementation the commit is for.
 - Each function also has a changelog section detailing when changes have been made to that function.
     - This is meant to help identify which functions need to be changed for each implementation.

@@ -97,11 +97,12 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int N = 30; // N for Nth fit -- best for seg lists seems to be ~30
+static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~30
 static const size_t min_moe_size = 256;
 static const size_t max_size = ~0x0;
 
-static const int num_bits_word_t = sizeof(word_t) << 3; // number of bytes in word_t * 8 = number of bits
+static const int char_bits = 8; // 8 bits in 1 byte
+static const int num_bits_word_t = sizeof(word_t) * char_bits; // number of bytes in word_t * 8 = number of bits
 static const int log2_min_block_size = 4; // log2(16) = 4 --> min_block_size isn't 16 yet but will be soon
 static const int last_list_index = 9;
 static const int seg_list_count = 10;
@@ -131,9 +132,9 @@ typedef struct block
 
 
 /* Global variables */
+
 /* Pointer to first block */
 static block_t *heap_start = NULL; // Pointer to the first block in the heap
-
 // Segregated Free List Headers
 static block_t *seg_lists[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
 // Segregated Free List Min Sizes -- used only for printing/debugging
@@ -458,7 +459,10 @@ static block_t *coalesce(block_t * block)
     }
 
     block_t *prev_block = find_prev(block);
-    bool prev_prev_alloc = get_prev_alloc(prev_block);
+
+     // note realized later -->
+     // this can be set to true since it cannot be a free block before another free block
+    bool prev_prev_alloc = true; // instead of: get_prev_alloc(prev_block);
     size_t prev_size = get_size(prev_block);
 
     // case 3
@@ -689,6 +693,7 @@ static size_t get_size(block_t *block)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Changed in remove footer. (added changelog in a later commit)
  */
 static size_t get_payload_size(block_t *block)
 {
@@ -955,7 +960,7 @@ static void list_remove(block_t *block) {
  * - Thanks to Andrew Carpenter for the idea and Eric Todd for additional ideas
  *
  * @Changelog
- * -
+ * - Added for Segregated List Implementation.
  */
 static int find_seg_list_index(size_t asize) {
     // returns the number of leading zeros in the binary representation of asize
@@ -981,6 +986,7 @@ static int find_seg_list_index(size_t asize) {
  * - Provided Function at Init.  Added Coalesce Invariant -- 1.
  * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
  * - Added Remove Footers Invariants -- 6, 7.
+ * - Added Segregated Free List Invariant -- 8.
  */
 bool mm_checkheap(int line)
 {
@@ -1021,13 +1027,14 @@ bool mm_checkheap(int line)
         }
     }
 
-    // loop through the free list for all invariants requiring the free list
+    // loop through the seg lists for all invariants requiring the seg free lists
     int list_index = 0;
     for(; list_index < seg_list_count; list_index++) {
 
         block_t *f_block = seg_lists[list_index];
         for(; f_block != NULL; f_block = f_block->next) {
             free_list_count++; // increment count of free list blocks
+            size_t block_size = get_size(f_block);
 
             // Check that the free list block is actually free
             if(get_alloc(f_block)) {
@@ -1041,9 +1048,18 @@ bool mm_checkheap(int line)
             // Check that the free list is doubly linked
             if(f_block->next != NULL && f_block->next->prev != f_block) {
                 printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
-                               " Broken at line %d with heap:\n"RESET,list_index, line);
+                               " Broken at line %d with heap:\n"RESET, list_index, line);
                 print_heap();
                 return false; // INVARIANT 3
+            }
+
+            // Check that all blocks are in the correct Seg List
+            if(block_size >= seg_list_sizes[list_index]
+                && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1])) {
+                printf(BOLD RED"Block in Wrong Seg List Invariant Broken at line %d with heap:\n"RESET, line);
+                print_heap();
+                print_seg_lists();
+                return false; // INVARIANT 8
             }
 
             const int too_large_number = 1000000000;
@@ -1122,6 +1138,17 @@ bool print_heap() {
  * - Created for Seg Lists to debug and print the segregated free lists.
  */
 bool print_seg_lists() {
+/*
+ * Include color codes to copy over print seg lists for debugging student code.
+ *
+ * #define RED     "\033[0;31m"
+ * #define BLUE    "\033[0;34m"
+ * #define MAGENTA "\033[0;35m"
+ * #define CYAN    "\033[0;36m"
+ * #define BOLD    "\033[1m"
+ * #define RESET   "\033[0m"
+ *
+ */
     int list_index = 0;
     printf(BOLD"SEGREGATED FREE LISTS\n"RESET);
     printf(BOLD"------------------------------------------------------------\n"RESET);

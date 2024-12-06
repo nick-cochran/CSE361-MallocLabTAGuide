@@ -36,21 +36,21 @@ void mem_init(){
     /* Dense allocation */
     mmap_length = MAX_DENSE_HEAP;
 
-    int dev_zero = open("/dev/zero", O_RDWR); // Comment out for running on Mac
+//    int dev_zero = open("/dev/zero", O_RDWR); // Comment out for running on Mac
     void *start = TRY_DENSE_HEAP_START;
-    void *addr = mmap(start,        /* suggested start*/
-                      mmap_length,  /* length */
-                      PROT_WRITE,   /* permissions */
-                      MAP_PRIVATE,  /* private or shared? */
-                      dev_zero,            /* fd */
-                      0);            /* offset */
-// For Running on Mac
-//     void *addr = mmap(start,        /* suggested start*/
+//    void *addr = mmap(start,        /* suggested start*/
 //                      mmap_length,  /* length */
 //                      PROT_WRITE,   /* permissions */
-//                      MAP_PRIVATE | MAP_ANON,  /* private or shared? */
-//                      -1,            /* fd */
+//                      MAP_PRIVATE,  /* private or shared? */
+//                      dev_zero,            /* fd */
 //                      0);            /* offset */
+// For Running on Mac
+     void *addr = mmap(start,        /* suggested start*/
+                      mmap_length,  /* length */
+                      PROT_WRITE,   /* permissions */
+                      MAP_PRIVATE | MAP_ANON,  /* private or shared? */
+                      -1,            /* fd */
+                      0);            /* offset */
     if (addr == MAP_FAILED) {
         fprintf(stderr, "FAILURE.  mmap couldn't allocate space for heap\n");
         exit(1);
