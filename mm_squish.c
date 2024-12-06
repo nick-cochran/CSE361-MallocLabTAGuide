@@ -17,6 +17,8 @@
  *                               Remove Footers                               *
  *                              Segregated Lists                              *
  *                                                                            *
+ *                               The Big Squish                               *
+ *                                                                            *
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
  *  Step 0: Please read the writeup!                                          *
