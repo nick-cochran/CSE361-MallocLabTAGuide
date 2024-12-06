@@ -97,7 +97,7 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~30
+static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~75
 static const size_t min_moe_size = 256;
 static const size_t max_size = ~0x0;
 
