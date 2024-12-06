@@ -1,8 +1,9 @@
 #
 # Makefile for the malloc lab
 #
-#CC = gcc
-CC = gcc-13 # for local mac execution/debugging
+
+CC = gcc
+#CC = gcc-13 # for local mac execution/debugging
 
 # Change this to -O0 (big-Oh, numeral zero) if you need to use a debugger on your code
 COPT = -O3
