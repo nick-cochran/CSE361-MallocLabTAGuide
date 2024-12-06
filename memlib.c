@@ -36,21 +36,21 @@ void mem_init(){
     /* Dense allocation */
     mmap_length = MAX_DENSE_HEAP;
 
-//    int dev_zero = open("/dev/zero", O_RDWR); // Comment out for running on Mac
+    int dev_zero = open("/dev/zero", O_RDWR); // Comment out for running on Mac
     void *start = TRY_DENSE_HEAP_START;
-//    void *addr = mmap(start,        /* suggested start*/
-//                      mmap_length,  /* length */
-//                      PROT_WRITE,   /* permissions */
-//                      MAP_PRIVATE,  /* private or shared? */
-//                      dev_zero,            /* fd */
-//                      0);            /* offset */
-// For Running on Mac
-     void *addr = mmap(start,        /* suggested start*/
+    void *addr = mmap(start,        /* suggested start*/
                       mmap_length,  /* length */
                       PROT_WRITE,   /* permissions */
-                      MAP_PRIVATE | MAP_ANON,  /* private or shared? */
-                      -1,            /* fd */
+                      MAP_PRIVATE,  /* private or shared? */
+                      dev_zero,            /* fd */
                       0);            /* offset */
+// For Running on Mac
+//     void *addr = mmap(start,        /* suggested start*/
+//                      mmap_length,  /* length */
+//                      PROT_WRITE,   /* permissions */
+//                      MAP_PRIVATE | MAP_ANON,  /* private or shared? */
+//                      -1,            /* fd */
+//                      0);            /* offset */
     if (addr == MAP_FAILED) {
         fprintf(stderr, "FAILURE.  mmap couldn't allocate space for heap\n");
         exit(1);
@@ -98,10 +98,10 @@ void *mem_sbrk(intptr_t incr) {
         fprintf(stderr, "ERROR: mem_sbrk failed. Ran out of memory.  Would require heap size of %zd (0x%zx) bytes\n", alloc, alloc);
     }
     // Comment out next 4 lines for running on Mac
-//     else if (sbrk(incr) == (void*) -1) {
-//        ok = false;
-//        fprintf(stderr, "ERROR: mem_sbrk failed.  Could not allocate more heap space\n");
-//    }
+     else if (sbrk(incr) == (void*) -1) {
+        ok = false;
+        fprintf(stderr, "ERROR: mem_sbrk failed.  Could not allocate more heap space\n");
+    }
     if (ok) {
         mem_brk += incr;
         return (void *) old_brk;
