@@ -92,12 +92,17 @@
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*sizeof(word_t);       // double word size (bytes)
-static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
+static const size_t min_block_size = dsize; // Minimum block size -- with Squish
+static const size_t squished_block_size = dsize; // another constant to make things clearer
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
+static const word_t is_16_mask = 0x4;
+
 static const word_t size_mask = ~(word_t)0xF;
+static const word_t squish_ptr_mask = ~(word_t)0x7;
+static const word_t squish_bits_mask = (word_t)0x7;
 
 static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~75
 static const size_t min_moe_size = 256;
@@ -106,30 +111,24 @@ static const size_t max_size = ~0x0;
 static const int char_bits = 8; // 8 bits in 1 byte
 static const int num_bits_word_t = sizeof(word_t) * char_bits; // number of bytes in word_t * 8 = number of bits
 static const int log2_min_block_size = 4; // log2(16) = 4 --> min_block_size isn't 16 yet but will be soon
+static const int first_list_index = 0;
 static const int last_list_index = 9;
 static const int seg_list_count = 10;
 
 
 typedef struct block
 {
-    // header: size + allocation flag + previous block allocation flag
+    // header: size + is_16 + prev_alloc + alloc
+    // squished header: prev pointer + is_16 + prev_alloc + alloc
     word_t header;
     union {
         struct {
-            struct block *next;
             struct block *prev;
+            struct block *next;
         };
-        /*
-         * We don't know how big the payload will be.  Declaring it as an
-         * array of size 0 allows computing its starting address using
-         * pointer notation.
-         */
         char payload[0];
+        word_t footer; // for big squish to hold next pointer and bits
     };
-    /*
-     * We can't declare the footer as part of the struct, since its starting
-     * position is unknown
-     */
 } block_t;
 
 
@@ -161,6 +160,8 @@ static bool extract_alloc(word_t word);
 static bool get_alloc(block_t *block);
 static bool get_prev_alloc(block_t *block);
 
+static bool get_is_16(block_t *block);
+
 static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc);
 static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc);
 static void update_next_prev_alloc(block_t *block, bool prev_alloc);
@@ -171,6 +172,11 @@ static void *header_to_payload(block_t *block);
 static block_t *find_next(block_t *block);
 static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
+
+static block_t* get_prev_squished(block_t *block);
+static block_t* get_next_squished(block_t *block);
+static void set_prev_squished(block_t *block, block_t *prev);
+static void set_next_squished(block_t *block, block_t *next);
 
 static void list_insert(block_t *block);
 static void list_remove(block_t *block);
@@ -225,6 +231,7 @@ bool mm_init(void)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to utilize space with Remove Footers.
+ * - TODO
  */
 void *malloc(size_t size) 
 {
@@ -251,15 +258,11 @@ void *malloc(size_t size)
 
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + wsize, dsize);
-    // ensure that asize does not roundup to less than min_block_size
-    if(asize < min_block_size) {
-        asize = min_block_size;
-    }
 
     // Search the free list for a fit
     block = find_fit(asize);
 
-    // If no fit is found, request more memory, and then and place the block
+    // If no fit is found, request more memory, and then place the block
     if (block == NULL)
     {  
         extendsize = max(asize, chunksize);
@@ -431,10 +434,8 @@ static block_t *extend_heap(size_t size)
 static block_t *coalesce(block_t * block) 
 {
     block_t *next_block = find_next(block);
-
     size_t block_size = get_size(block);
 
-     // check edge case where previous block is prologue
     bool prev_alloc = get_prev_alloc(block);
     bool next_alloc = get_alloc(next_block);
 
@@ -643,9 +644,11 @@ static size_t round_up(size_t size, size_t n)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
+ * - TODO
  */
 static word_t pack(size_t size, bool alloc, bool prev_alloc)
 {
+    size = size == min_block_size ? is_16_mask : size; // TODO does this work???
     return alloc ? (prev_alloc ? (size | alloc_mask | prev_alloc_mask) : (size | alloc_mask))
                     : (prev_alloc ? (size | prev_alloc_mask) : size);
 }
@@ -664,7 +667,7 @@ static word_t pack(size_t size, bool alloc, bool prev_alloc)
  */
 static size_t extract_size(word_t word)
 {
-    return (word & size_mask);
+    return (word & is_16_mask) ? min_block_size : (word & size_mask);
 }
 
 
@@ -678,6 +681,7 @@ static size_t extract_size(word_t word)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - TODO
  */
 static size_t get_size(block_t *block)
 {
@@ -753,6 +757,20 @@ static bool get_prev_alloc(block_t *block)
 }
 
 /**
+ * @brief returns the is_16 status of a given block using it's header.
+ *
+ * @param block the block to get the is_16 bit from.
+ *
+ * @return the bool value of the is_16 bit.
+ *
+ * @Changelog
+ * - Added Function for Big Squish.
+ */
+static bool get_is_16(block_t *block) {
+    return (bool)(block->header & is_16_mask);
+}
+
+/**
  * @brief given a block and its size and allocation status,
  *        writes an appropriate value to the block header.
  *
@@ -763,10 +781,18 @@ static bool get_prev_alloc(block_t *block)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
+ * - TODO
  */
 static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
-    block->header = pack(size, alloc, prev_alloc);
+    // TODO come back to this
+    // if the block was previously 16 bytes and still is, preserve the pointer
+    if(get_is_16(block) && size == squished_block_size) {
+        block_t *prev = get_prev_squished(block);
+        block->header = pack(size, alloc, prev_alloc) | (word_t) prev;
+    } else {
+        block->header = pack(size, alloc, prev_alloc);
+    }
 }
 
 
@@ -782,11 +808,19 @@ static void write_header(block_t *block, size_t size, bool alloc, bool prev_allo
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
+ * - TODO
  */
 static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
-    *footerp = pack(size, alloc, prev_alloc);
+
+    // if the block was previously 16 bytes and still is, preserve the pointer
+    if(get_is_16(block) && size == squished_block_size) {
+        block_t *next = get_next_squished(block);
+        block->footer = pack(size, alloc, prev_alloc) | (word_t) next;
+    } else {
+        *footerp = pack(size, alloc, prev_alloc);
+    }
 }
 
 /**
@@ -892,6 +926,64 @@ static block_t *find_prev(block_t *block)
 }
 
 /**
+ * @brief Returns the previous pointer from a squished free block,
+ *          does not verify it is a 16 byte block.
+ *
+ * @param block the block to get the previous pointer from.
+ *
+ * @return the previous pointer from the block.
+ *
+ * @Changelog
+ * - Added Function for Big Squish.
+ */
+static block_t* get_prev_squished(block_t *block) {
+        return (block_t*) (block->header & squish_ptr_mask);
+}
+
+/**
+ * @brief Returns the next pointer from a squished free block,
+ *          does not verify it is a 16 byte block.
+ *
+ * @param block the block to get the next pointer from.
+ *
+ * @return the next pointer from the block.
+ *
+ * @Changelog
+ * - Added Function for Big Squish.
+ */
+static block_t* get_next_squished(block_t *block) {
+        return (block_t*) (block->footer & squish_ptr_mask);
+}
+
+/**
+ * @brief Sets the previous pointer for a squished free block,
+ *          does not verify it is a 16 byte block.
+ *
+ * @param block the block to set the previous pointer for.
+ * @param prev the block to set as the previous pointer.
+ *
+ * @Changelog
+ * - Added Function for Big Squish.
+ */
+static void set_prev_squished(block_t *block, block_t *prev) {
+        block->header = (block->header & squish_bits_mask) | (word_t) prev;
+}
+
+/**
+ * @brief sets the next pointer for a squished free block,
+ *         does not verify it is a 16 byte block.
+ *
+ * @param block the block to set the next pointer for.
+ * @param next the block to set as the next pointer.
+ *
+ * @Changelog
+ * - Added Function for Big Squish.
+ */
+static void set_next_squished(block_t *block, block_t *next) {
+        block->footer = (block->footer & squish_bits_mask) | (word_t) next;
+}
+
+/**
  * @brief insert the block at the beginning of the correct seg list
  *
  * @param block the block to be inserted
@@ -899,22 +991,37 @@ static block_t *find_prev(block_t *block)
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
+ * - TODO DONE
  */
 static void list_insert(block_t *block) {
 
-    int list_index = find_seg_list_index(get_size(block));
+    size_t block_size = get_size(block);
+    int list_index = find_seg_list_index(block_size);
     block_t *list_head = seg_lists[list_index];
 
-    // empty free list
-    if(list_head == NULL) {
-        block->prev = NULL;
-        block->next = NULL;
-    }
-    // at least one item in the free list
-    else {
-        block->prev = NULL;
-        block->next = list_head;
-        list_head->prev = block;
+    if(block_size == squished_block_size) { // insert squished block into 16 byte list
+
+        if(list_head == NULL) { // empty free list
+            set_prev_squished(block, NULL);
+            set_next_squished(block, NULL);
+        }
+        else { // at least one item in the free list
+            set_prev_squished(block, NULL);
+            set_next_squished(block, list_head);
+            set_prev_squished(list_head, block);
+        }
+
+    } else { // insert non-squished block
+
+        if(list_head == NULL) { // empty free list
+            block->prev = NULL;
+            block->next = NULL;
+        }
+        else { // at least one item in the free list
+            block->prev = NULL;
+            block->next = list_head;
+            list_head->prev = block;
+        }
     }
     seg_lists[list_index] = block;
 }
@@ -927,27 +1034,49 @@ static void list_insert(block_t *block) {
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
+ * - TODO DONE
  */
 static void list_remove(block_t *block) {
 
-    int list_index = find_seg_list_index(get_size(block));
+    size_t block_size = get_size(block);
 
-    block_t *prev_block = block->prev;
-    block_t *next_block = block->next;
 
-    if(prev_block == NULL && next_block == NULL) {
-        seg_lists[list_index] = NULL;
-    }
-    else if(prev_block == NULL) {
-        next_block->prev = NULL;
-        seg_lists[list_index] = next_block;
-    }
-    else if(next_block == NULL) {
-        prev_block->next = NULL;
-    }
-    else {
-        prev_block->next = next_block;
-        next_block->prev = prev_block;
+    if(block_size == squished_block_size) { // remove a squished block from 16 byte seg list
+        // avoid extra function call because we know what list index for sure
+        int list_index = first_list_index;
+
+        block_t *prev_block = get_prev_squished(block);
+        block_t *next_block = get_next_squished(block);
+
+        if(!prev_block && !next_block) {
+            seg_lists[list_index] = NULL;
+        } else if(!prev_block) {
+            set_prev_squished(next_block, NULL);
+            seg_lists[list_index] = next_block;
+        } else if(!next_block) {
+            set_next_squished(prev_block, NULL);
+        } else {
+            set_next_squished(prev_block, next_block);
+            set_prev_squished(next_block, prev_block);
+        }
+
+    } else { // remove all other blocks from its seg list
+        int list_index = find_seg_list_index(block_size);
+
+        block_t *prev_block = block->prev;
+        block_t *next_block = block->next;
+
+        if(prev_block == NULL && next_block == NULL) {
+            seg_lists[list_index] = NULL;
+        } else if(prev_block == NULL) {
+            next_block->prev = NULL;
+            seg_lists[list_index] = next_block;
+        } else if(next_block == NULL) {
+            prev_block->next = NULL;
+        } else {
+            prev_block->next = next_block;
+            next_block->prev = prev_block;
+        }
     }
 }
 
@@ -1015,10 +1144,20 @@ bool mm_checkheap(int line)
                 return false; // INVARIANT 1
             }
 
-            if (b->header != *find_prev_footer(next)) {
-                printf(BOLD RED"Footer Not Matching Header Invariant Broken at line %d with heap:\n"RESET, line);
-                print_heap();
-                return false; // INVARIANT 6
+            // Check that the footer matches the header
+            bool is_16 = get_is_16(b);
+            if(is_16) {
+                if((b->header & squish_bits_mask) != (b->footer & squish_bits_mask)) {
+                    printf(BOLD RED"Footer Not Matching Header (Squished) Invariant Broken at line %d with heap:\n"RESET, line);
+                    print_heap();
+                    return false; // INVARIANT 6A
+                }
+            } else {
+                if(b->header != *find_prev_footer(next)) {
+                    printf(BOLD RED"Footer Not Matching Header (Non-Squished) Invariant Broken at line %d with heap:\n"RESET, line);
+                    print_heap();
+                    return false; // INVARIANT 6B
+                }
             }
         }
 
@@ -1034,9 +1173,10 @@ bool mm_checkheap(int line)
     for(; list_index < seg_list_count; list_index++) {
 
         block_t *f_block = seg_lists[list_index];
-        for(; f_block != NULL; f_block = f_block->next) {
+        while(f_block != NULL) {
             free_list_count++; // increment count of free list blocks
             size_t block_size = get_size(f_block);
+            bool is_16 = get_is_16(f_block);
 
             // Check that the free list block is actually free
             if(get_alloc(f_block)) {
@@ -1047,8 +1187,14 @@ bool mm_checkheap(int line)
                 return false; // INVARIANT 2
             }
 
+            block_t *next = is_16 ? get_next_squished(f_block) : f_block->next;
+            block_t *next_prev = NULL;
+            if(next) {
+                next_prev = get_is_16(next) ? get_prev_squished(next) : next->prev;
+            }
+
             // Check that the free list is doubly linked
-            if(f_block->next != NULL && f_block->next->prev != f_block) {
+            if(next != NULL && next_prev != f_block) {
                 printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
                                " Broken at line %d with heap:\n"RESET, list_index, line);
                 print_heap();
@@ -1056,8 +1202,8 @@ bool mm_checkheap(int line)
             }
 
             // Check that all blocks are in the correct Seg List
-            if(block_size >= seg_list_sizes[list_index]
-                && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1])) {
+            if(!(block_size >= seg_list_sizes[list_index]
+                && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1]))) {
                 printf(BOLD RED"Block in Wrong Seg List Invariant Broken at line %d with heap:\n"RESET, line);
                 print_heap();
                 print_seg_lists();
@@ -1071,6 +1217,7 @@ bool mm_checkheap(int line)
                 return false; // INVARIANT 5
             }
 
+            f_block = next;
         }
     }
 
@@ -1122,7 +1269,10 @@ bool print_heap() {
             printf("\n");
         }
         else {
-    		printf(BLUE"\tprev: %p\tnext: %p\n"RESET, b->prev, b->next);
+            bool is_16 = get_is_16(b);
+            block_t *prev = is_16 ? get_prev_squished(b) : b->prev;
+            block_t *next = is_16 ? get_next_squished(b) : b->next;
+    		printf(BLUE"\tprev: %p\tnext: %p\n"RESET, prev, next);
         }
         count++;
     }
@@ -1164,8 +1314,14 @@ bool print_seg_lists() {
             continue;
         }
         int count = 1;
-        for(; block != NULL; block = block->next, count++) {
-            printf(BOLD"Block %d"RESET" with ADDR: %p, \tsize: %lu\n", count, block, get_size(block));
+        if(list_index == first_list_index) { // for loop for 16 byte list
+            for(; block != NULL; block = get_next_squished(block), count++) {
+                printf(BOLD"Block %d"RESET" with ADDR: %p, \tsize: %lu\n", count, block, get_size(block));
+            }
+        } else { // for loop for all other seg lists
+            for(; block != NULL; block = block->next, count++) {
+                printf(BOLD"Block %d"RESET" with ADDR: %p, \tsize: %lu\n", count, block, get_size(block));
+            }
         }
     }
     printf(BOLD"------------------------------------------------------------\n\n"RESET);
