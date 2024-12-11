@@ -231,7 +231,7 @@ bool mm_init(void)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to utilize space with Remove Footers.
- * - TODO
+ * - Updated to use 16 byte blocks.
  */
 void *malloc(size_t size) 
 {
@@ -644,11 +644,11 @@ static size_t round_up(size_t size, size_t n)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO
+ * - Changed to accommodate is_16 bit instead of size for 16 byte blocks.
  */
 static word_t pack(size_t size, bool alloc, bool prev_alloc)
 {
-    size = size == min_block_size ? is_16_mask : size; // TODO does this work???
+    size = size == min_block_size ? is_16_mask : size;
     return alloc ? (prev_alloc ? (size | alloc_mask | prev_alloc_mask) : (size | alloc_mask))
                     : (prev_alloc ? (size | prev_alloc_mask) : size);
 }
@@ -664,6 +664,7 @@ static word_t pack(size_t size, bool alloc, bool prev_alloc)
  *
  * @Changelog
  * - Provided Function at Init.
+ * - Adjusted to check for 16 byte blocks.
  */
 static size_t extract_size(word_t word)
 {
@@ -681,7 +682,6 @@ static size_t extract_size(word_t word)
  *
  * @Changelog
  * - Provided Function at Init.
- * - TODO
  */
 static size_t get_size(block_t *block)
 {
@@ -781,11 +781,10 @@ static bool get_is_16(block_t *block) {
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO
+ * - Adjusted to save pointers for squished 16 byte blocks.
  */
 static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
-    // TODO come back to this
     // if the block was previously 16 bytes and still is, preserve the pointer
     if(get_is_16(block) && size == squished_block_size) {
         block_t *prev = get_prev_squished(block);
@@ -808,7 +807,7 @@ static void write_header(block_t *block, size_t size, bool alloc, bool prev_allo
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO
+ * - Adjusted to save pointers for squished 16 byte blocks.
  */
 static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
@@ -991,7 +990,7 @@ static void set_next_squished(block_t *block, block_t *next) {
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
- * - TODO DONE
+ * - Added condition for when inserting a squished block.
  */
 static void list_insert(block_t *block) {
 
@@ -1034,7 +1033,7 @@ static void list_insert(block_t *block) {
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
- * - TODO DONE
+ * - Added condition for when removing a squished block.
  */
 static void list_remove(block_t *block) {
 
