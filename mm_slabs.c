@@ -95,6 +95,7 @@ static const size_t dsize = 2*sizeof(word_t);       // double word size (bytes)
 static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
+static const word_t is_slab_mask = 0x1; // both checks for if it's a slab and a slab block
 static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
@@ -109,27 +110,34 @@ static const int log2_min_block_size = 4; // log2(16) = 4 --> min_block_size isn
 static const int last_list_index = 9;
 static const int seg_list_count = 10;
 
+static const int slab_list_index = 0; // put slab blocks in the first seg list
+static const size_t slab_payload_size = 15; // max number of bytes in a slab
+static const size_t slab_header_size = 1; // max number of bytes in a slab
+static const size_t slab_size = 16; // number of bytes in a slab total
+static const size_t num_slabs = 48; // number of slabs in a slab block
+static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
+static const size_t slab_block_size = num_slabs * min_block_size + (slab_block_overhead + wsize); // size of a slabs + overhead (with 8 unused bytes)
+
+static const word_t vector_mask = (0x1 << num_slabs)-1;
+
 
 typedef struct block
 {
-    // header: size + allocation flag + previous block allocation flag
+    // normal header: size + prev alloc flag + alloc flag + is_slab flag
+    // slab header: prev_ptr + prev_alloc flag + alloc flag + is_slab flag
     word_t header;
     union {
         struct {
             struct block *next;
             struct block *prev;
         };
-        /*
-         * We don't know how big the payload will be.  Declaring it as an
-         * array of size 0 allows computing its starting address using
-         * pointer notation.
-         */
+        struct {
+            struct block *next;
+            word_t bit_vector;
+            char payload[0];
+        } slab;
         char payload[0];
     };
-    /*
-     * We can't declare the footer as part of the struct, since its starting
-     * position is unknown
-     */
 } block_t;
 
 
@@ -176,6 +184,28 @@ static void list_insert(block_t *block);
 static void list_remove(block_t *block);
 
 static int find_seg_list_index(size_t asize);
+
+// SLABS FUNCTIONS
+static void *place_in_slab(size_t size);
+static block_t *free_from_slab(void *sp);
+
+static block_t *find_fit_slab();
+static block_t *init_slab_block();
+static size_t get_free_slab(block_t *slab_block);
+static void *slab_at_index(block_t *slab_block, size_t index);
+static void update_vector(block_t *slab_block, int index, bool alloc);
+
+static char *slab_to_mini_header(void *sp);
+static size_t get_slab_index(void *sp);
+static block_t *slab_to_header(void *sp);
+static void pack_mini_header(void *sp, size_t index);
+
+static bool is_slab_block(block_t *block);
+static bool is_slab(void *sp);
+static bool is_slab_block_full(block_t *block);
+static bool is_slab_block_empty(block_t *block);
+
+// END SLABS FUNCTIONS
 
 bool mm_checkheap(int lineno);
 bool print_heap();
@@ -225,6 +255,7 @@ bool mm_init(void)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to utilize space with Remove Footers.
+ * - TODO slabs
  */
 void *malloc(size_t size) 
 {
@@ -238,22 +269,23 @@ void *malloc(size_t size)
     block_t *block;
     void *bp = NULL;
 
-    if (heap_start == NULL) // Initialize heap if it isn't initialized
-    {
+    if (heap_start == NULL) { // Initialize heap if it isn't initialized
         mm_init();
     }
 
-    if (size == 0) // Ignore spurious request
-    {
+    if (size == 0) { // Ignore spurious request
         dbg_ensures(mm_checkheap(__LINE__));
         return bp;
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + wsize, dsize);
-    // ensure that asize does not roundup to less than min_block_size
-    if(asize < min_block_size) {
-        asize = min_block_size;
+    if(size <= slab_payload_size) {
+        // TODO run slab code
+        void *sp = place_in_slab(size);
+        return sp;
+
+    } else {
+        asize = round_up(size + wsize, dsize);
     }
 
     // Search the free list for a fit
@@ -284,6 +316,7 @@ void *malloc(size_t size)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to work better with Remove Footers.
+ * - TODO slabs
  */
 void free(void *bp)
 {
@@ -291,12 +324,23 @@ void free(void *bp)
     dbg_ensures(print_heap());
     dbg_ensures(print_seg_lists());
 
-    if (bp == NULL)
-    {
+    block_t *block;
+
+    if (bp == NULL) {
         return;
     }
 
-    block_t *block = payload_to_header(bp);
+    if(is_slab(bp)) {
+        // TODO run slab code
+        block = free_from_slab(bp);
+        if(!is_slab_block_empty(block)) {
+            return; // if slab block is not empty, we are done
+        }
+        // if the slab block is empty, remove it from the list and coalesce it
+        list_remove(block);
+    } else { // regular block
+        block = payload_to_header(bp);
+    }
 
     update_next_prev_alloc(coalesce(block), false);
 
@@ -963,9 +1007,13 @@ static void list_remove(block_t *block) {
  *
  * @Changelog
  * - Added for Segregated List Implementation.
+ * - TODO
  */
 static int find_seg_list_index(size_t asize) {
     // returns the number of leading zeros in the binary representation of asize
+    if(asize == min_block_size) {
+        return slab_list_index;
+    }
     int leading_zeros = __builtin_clzll(asize);
     // convert to the number of trailing zeros with (num_bits_word_t - leading zeros - 1)
     int trailing_zeros = num_bits_word_t - leading_zeros - 1;
@@ -975,6 +1023,155 @@ static int find_seg_list_index(size_t asize) {
     return index <= last_list_index ? index : last_list_index;
 }
 
+
+// SLAB_SECTION
+
+static void *place_in_slab(size_t size) {
+
+    block_t *slab_block = find_fit_slab();
+
+    if(slab_block == NULL) {
+        slab_block = init_slab_block();
+    }
+
+    size_t slab_index = get_free_slab(slab_block);
+    update_vector(slab_block, slab_index, true);
+
+    if(is_slab_block_full(slab_block)) {
+        list_remove(slab_block);
+    }
+
+    // return a void * to the slab at the found index
+    return slab_at_index(slab_block, slab_index);
+}
+
+
+static block_t *free_from_slab(void *sp) {
+    size_t index = get_slab_index(sp);
+    block_t *slab_block = slab_to_header(sp);
+
+    bool was_full = is_slab_block_full(slab_block);
+
+    update_vector(slab_block, index, false);
+
+    if(was_full) {
+        list_insert(slab_block);
+    }
+
+    return slab_block;
+}
+
+
+static block_t *find_fit_slab() {
+    block_t *slab_block = seg_lists[slab_list_index];
+    for(; slab_block != NULL; slab_block = slab_block->next) {
+        if(!is_slab_block_full(slab_block)) {
+            return slab_block;
+        }
+    }
+    return NULL;
+}
+
+
+static block_t *init_slab_block() {
+    block_t *slab_block = find_fit(slab_block_size);
+    if(slab_block == NULL) {
+        slab_block = extend_heap(slab_block_size);
+    }
+
+    size_t index = 0;
+    for(; index < num_slabs; ++index) {
+        void *sp = slab_at_index(slab_block, index);
+        pack_mini_header(sp, index);
+    }
+
+    slab_block->slab.bit_vector = 0;
+
+    list_insert(slab_block);
+    return slab_block;
+}
+
+
+static size_t get_free_slab(block_t *slab_block) {
+    size_t pos = 0;
+
+    if(is_slab_block_empty(slab_block)) {
+        return pos;
+    }
+
+    for(; pos < num_slabs; ++pos) {
+        if(pos % 1 == 0) {
+            return pos;
+        }
+    }
+
+    // return the number of slabs, indicating error, as that is 1 more than the largest index
+    return num_slabs;
+}
+
+
+static void *slab_at_index(block_t *slab_block, size_t index) {
+    return (void *) (slab_block->slab.payload + (index * slab_size) + slab_header_size);
+}
+
+
+static void update_vector(block_t *slab_block, int index, bool alloc) {
+    word_t vector = slab_block->slab.bit_vector;
+    word_t index_mask = 0x1 << index;
+
+    if(alloc) {
+        slab_block->slab.bit_vector = vector | index_mask;
+    } else {
+        slab_block->slab.bit_vector = vector & (~index_mask);
+    }
+}
+
+
+static char *slab_to_mini_header(void *sp) {
+    return (char *) sp-1;
+}
+
+
+static size_t get_slab_index(void *sp) {
+    char mini_header = *slab_to_mini_header(sp);
+    return (size_t) ((mini_header & ~is_slab_mask) >> 1);
+}
+
+
+static block_t *slab_to_header(void *sp) {
+    size_t index = get_slab_index(sp);
+    return (block_t *) sp - (index * slab_size) - slab_header_size - slab_block_overhead;
+}
+
+
+static void pack_mini_header(void *sp, size_t index) {
+    char *header = slab_to_mini_header(sp);
+    *header = (index << 1) | is_slab_mask;
+}
+
+
+static bool is_slab_block(block_t *block) {
+    return block->header & is_slab_mask;
+}
+
+
+static bool is_slab(void *sp) {
+    return *slab_to_mini_header(sp) & is_slab_mask;
+}
+
+
+static bool is_slab_block_full(block_t *block) {
+    return block->slab.bit_vector ^ vector_mask;
+}
+
+
+static bool is_slab_block_empty(block_t *block) {
+    return !block->slab.bit_vector;
+}
+
+
+
+// END SLAB_SECTION
 
 
 /**
