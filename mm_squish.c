@@ -1117,6 +1117,7 @@ static int find_seg_list_index(size_t asize) {
  * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
  * - Added Remove Footers Invariants -- 6, 7.
  * - Added Segregated Free List Invariant -- 8.
+ * - Added Checks for Squished Blocks to Existing Invariants.
  */
 bool mm_checkheap(int line)
 {
