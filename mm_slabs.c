@@ -113,7 +113,7 @@ static const int seg_list_count = 10;
 
 static const int slab_list_index = 0; // put slab blocks in the first seg list
 static const size_t slab_payload_size = 15; // max number of bytes in a slab
-static const size_t slab_header_size = 1; // max number of bytes in a slab
+// static const size_t slab_header_size = 1; // max number of bytes in a slab
 static const size_t slab_size = 16; // number of bytes in a slab total
 static const size_t num_slabs = 48; // number of slabs in a slab block
 static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
@@ -121,7 +121,7 @@ static const size_t slab_block_size = num_slabs * min_block_size
                                 + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
 
 static const word_t vector_mask =             0x0000FFFFFFFFFFFF;
-static const word_t vector_mask_with_bit =    0x0100FFFFFFFFFFFF;
+// static const word_t vector_mask_with_bit =    0x0100FFFFFFFFFFFF;
 static const word_t vector_slab_header_mask = 0xFF00000000000000;
 static const word_t vector_slab_bit =         0x0100000000000000;
 //static const word_t vector_mask = (0x1 << num_slabs)-1;
@@ -271,7 +271,7 @@ void *malloc(size_t size)
 {
 //    printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
     dbg_printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
-    dbg_ensures(print_heap());
+    // dbg_ensures(print_heap());
 //    dbg_ensures(print_seg_lists());
 
     dbg_requires(mm_checkheap(__LINE__));
@@ -293,6 +293,8 @@ void *malloc(size_t size)
     if(size <= slab_payload_size) {
         // TODO run slab code
         void *sp = place_in_slab();
+
+        dbg_ensures(print_heap());
         return sp;
     }
 
@@ -317,11 +319,12 @@ void *malloc(size_t size)
     place(block, asize);
     bp = header_to_payload(block);
 
-    if(bp == 0x800079ce0) {
+    // if(bp == 0x800079ce0) {
 //        printf("bp is 0x800079ce0\n");
-    }
+    // }
 
     dbg_ensures(mm_checkheap(__LINE__));
+    dbg_ensures(print_heap());
     return bp;
 } 
 
@@ -337,7 +340,7 @@ void free(void *bp)
 {
 //    printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
     dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
-    dbg_ensures(print_heap());
+    // dbg_ensures(print_heap());
 //    dbg_ensures(print_seg_lists());
 
     block_t *block;
@@ -350,9 +353,11 @@ void free(void *bp)
         // TODO run slab code
         block = free_from_slab(bp);
         if(!is_slab_block_empty(block)) {
+            dbg_ensures(print_heap());
             return; // if slab block is not empty, we are done
         }
         // if the slab block is empty, remove it from the list, make sure the slab bit is false, and coalesce it
+        dbg_printf("COALESCING SLAB\n");
         list_remove(block);
         bool prev_alloc = get_prev_alloc(block);
         set_is_slab(block, false);
@@ -366,6 +371,8 @@ void free(void *bp)
 
     update_next_prev_alloc(coalesce(block), false);
     dbg_ensures(mm_checkheap(__LINE__));
+
+    dbg_ensures(print_heap());
 }
 
 /**
@@ -1108,9 +1115,9 @@ static void list_remove(block_t *block) {
 
         block_t *prev_block = block->prev;
         block_t *next_block = block->next;
-        if((int) prev_block == 0x36) {
-            printf("here");
-        }
+        // if((int) prev_block == 0x36) {
+        //     printf("here");
+        // }
 
         if(prev_block == NULL && next_block == NULL) {
             seg_lists[list_index] = NULL;
@@ -1170,9 +1177,9 @@ static void *place_in_slab() {
     dbg_requires(slab_index != num_slabs);
     update_vector(slab_block, slab_index, true);
 
-//    if(is_slab_block_full(slab_block)) {
-//        list_remove(slab_block);
-//    }
+   if(is_slab_block_full(slab_block)) {
+       list_remove(slab_block);
+   }
 
     // return a void * to the slab at the found index
     return slab_at_index(slab_block, slab_index);
@@ -1183,11 +1190,11 @@ static block_t *free_from_slab(void *sp) {
     size_t index = get_slab_index(sp);
     block_t *slab_block = slab_to_header(sp);
 
-    update_vector(slab_block, index, false);
+    if(is_slab_block_full(slab_block)) {
+        list_insert(slab_block);
+    }
 
-//    if(is_slab_block_full(slab_block)) {
-//        list_insert(slab_block);
-//    }
+    update_vector(slab_block, index, false);
 
     return slab_block;
 }
@@ -1476,6 +1483,8 @@ bool print_heap() {
 
     int count = 1;
 
+    printf("slab list head: %p\n", seg_lists[slab_list_index]);
+
     for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
         bool alloc = get_alloc(b);
 
@@ -1485,7 +1494,7 @@ bool print_heap() {
                count, b, alloc_status, prev_alloc_status, get_size(b));
         if(is_slab_block(b)) {
             printf(","YELLOW"\tSLAB BLOCK"RESET);
-            printf(BLUE"\tprev: %p\tnext: %p\n"RESET, get_prev_ptr_slab(b), b->slab.next);
+            printf(BLUE"\t vector: %lu\tprev: %p\tnext: %p\n"RESET,b->slab.bit_vector & vector_mask, get_prev_ptr_slab(b), b->slab.next);
         } else if (alloc) {
             printf("\n");
         }
