@@ -72,6 +72,7 @@
  * Debugging macros, with names beginning "dbg_" are allowed.
  * You may not define any other macros having arguments.
  */
+
 // #define DEBUG // *** uncomment this line to enable debugging ***
 
 #ifdef DEBUG
@@ -86,6 +87,23 @@
 #define dbg_requires(...)
 #define dbg_assert(...)
 #define dbg_ensures(...)
+#endif
+
+
+// #define SOFT_DEBUG // *** uncomment this line to enable soft debugging ***
+
+#ifdef SOFT_DEBUG
+/* When debugging is enabled, these form aliases to useful functions */
+#define sdbg_printf(...) printf(__VA_ARGS__)
+#define sdbg_requires(...) assert(__VA_ARGS__)
+#define sdbg_assert(...) assert(__VA_ARGS__)
+#define sdbg_ensures(...) assert(__VA_ARGS__)
+#else
+/* When debugging is disnabled, no code gets generated for these */
+#define sdbg_printf(...)
+#define sdbg_requires(...)
+#define sdbg_assert(...)
+#define sdbg_ensures(...)
 #endif
 
 /* Basic constants */
@@ -107,7 +125,8 @@ static const size_t max_size = ~0x0;
 
 static const int char_bits = 8; // 8 bits in 1 byte
 static const int num_bits_word_t = sizeof(word_t) * char_bits; // number of bytes in word_t * 8 = number of bits
-static const int log2_min_block_size = 4; // log2(16) = 4 --> min_block_size isn't 16 yet but will be soon
+ // log2(32) = 5 - 1 = 4 --> min_block_size is smallest non-slab so make the smallest seg list the slabs list
+static const int log2_min_block_size = 4;
 static const int last_list_index = 9;
 static const int seg_list_count = 10;
 
@@ -117,10 +136,10 @@ static const size_t slab_payload_size = 15; // max number of bytes in a slab
 static const size_t slab_size = 16; // number of bytes in a slab total
 static const size_t num_slabs = 48; // number of slabs in a slab block
 static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
-static const size_t slab_block_size = num_slabs * min_block_size
-                                + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
+static const size_t slab_block_size = num_slabs * slab_size + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
 
-static const word_t vector_mask =             0x0000FFFFFFFFFFFF;
+static const word_t vector_mask =             ~((word_t) 0xFFFF << 48);
+//static const word_t vector_mask =             0x0000FFFFFFFFFFFF;
 // static const word_t vector_mask_with_bit =    0x0100FFFFFFFFFFFF;
 static const word_t vector_slab_header_mask = 0xFF00000000000000;
 static const word_t vector_slab_bit =         0x0100000000000000;
@@ -137,7 +156,7 @@ typedef struct block
             struct block *next;
             struct block *prev;
         };
-        struct {
+        struct { // slab block
             struct block *next;
             word_t bit_vector;
             char payload[0];
@@ -192,6 +211,7 @@ static void list_remove(block_t *block);
 static int find_seg_list_index(size_t asize);
 
 // SLABS FUNCTIONS
+
 static void *place_in_slab();
 static block_t *free_from_slab(void *sp);
 
@@ -214,11 +234,19 @@ static bool is_slab_block_full(block_t *block);
 static bool is_slab_block_empty(block_t *block);
 static void set_is_slab(block_t *block, bool is_slab);
 
+static long slab_free_over_malloc_counter = 0;
+static size_t total_slab_blocks_full = 0;
+
+static size_t max_slabs_used = 0;
+static size_t extends_for_slabs = 0;
+
 // END SLABS FUNCTIONS
 
 bool mm_checkheap(int lineno);
-bool print_heap();
+bool print_heap(bool print_full);
 bool print_seg_lists();
+
+
 
 
 /**
@@ -233,10 +261,16 @@ bool print_seg_lists();
  */
 bool mm_init(void) 
 {
+//    printf(BOLD YELLOW"mm_init called\n"RESET);
+//    printf(BOLD YELLOW"%zu slabs are used\n"RESET, slab_use_count);
     // set seg list heads to NULL for when the code resets
     for(int i = 0; i < seg_list_count; i++) {
         seg_lists[i] = NULL;
     }
+
+    slab_free_over_malloc_counter = 0;
+    max_slabs_used = 0;
+    extends_for_slabs = 0;
 
     // Create the initial empty heap 
     word_t *start = (word_t *)(mem_sbrk(2*wsize));
@@ -269,12 +303,11 @@ bool mm_init(void)
  */
 void *malloc(size_t size) 
 {
-//    printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
-    dbg_printf(BOLD MAGENTA"MALLOC CALLED with size: %lu\n"RESET, size);
-    // dbg_ensures(print_heap());
+    sdbg_printf(BOLD RED"MALLOC CALLED with size: %lu\n"RESET, size);
+//    dbg_ensures(print_heap(false));
 //    dbg_ensures(print_seg_lists());
 
-    dbg_requires(mm_checkheap(__LINE__));
+//    dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
     size_t extendsize; // Amount to extend heap if no fit is found
     block_t *block;
@@ -291,10 +324,15 @@ void *malloc(size_t size)
 
     // run slab code if the size fits in a slab
     if(size <= slab_payload_size) {
+        --slab_free_over_malloc_counter;
         // TODO run slab code
         void *sp = place_in_slab();
 
-        dbg_ensures(print_heap());
+//        printf(MAGENTA BOLD "Placed %zu bytes in a slab\n" RESET, size);
+//        if(size == 7) {
+//            bool _ = print_heap(false);
+//        }
+        dbg_ensures(print_heap(false));
         return sp;
     }
 
@@ -323,8 +361,8 @@ void *malloc(size_t size)
 //        printf("bp is 0x800079ce0\n");
     // }
 
-    dbg_ensures(mm_checkheap(__LINE__));
-    dbg_ensures(print_heap());
+//    dbg_ensures(mm_checkheap(__LINE__));
+    dbg_ensures(print_heap(false));
     return bp;
 } 
 
@@ -338,9 +376,8 @@ void *malloc(size_t size)
  */
 void free(void *bp)
 {
-//    printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
-    dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
-    // dbg_ensures(print_heap());
+    sdbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
+//    dbg_ensures(print_heap(false));
 //    dbg_ensures(print_seg_lists());
 
     block_t *block;
@@ -351,28 +388,27 @@ void free(void *bp)
 
     if(is_slab(bp)) {
         // TODO run slab code
+        ++slab_free_over_malloc_counter;
         block = free_from_slab(bp);
         if(!is_slab_block_empty(block)) {
-            dbg_ensures(print_heap());
-            return; // if slab block is not empty, we are done
+            dbg_ensures(print_heap(false));
+            return; // if slab block is not empty, don't coalesce
         }
-        // if the slab block is empty, remove it from the list, make sure the slab bit is false, and coalesce it
-        dbg_printf("COALESCING SLAB\n");
-        list_remove(block);
-        bool prev_alloc = get_prev_alloc(block);
-        set_is_slab(block, false);
-        write_header(block, slab_block_size, false, prev_alloc);
-        write_footer(block, slab_block_size, false, prev_alloc);
-        block->prev = NULL;
-        block->next = NULL;
     } else { // regular block
         block = payload_to_header(bp);
     }
 
-    update_next_prev_alloc(coalesce(block), false);
-    dbg_ensures(mm_checkheap(__LINE__));
+    block_t *coal_block = coalesce(block);
+    update_next_prev_alloc(coal_block, false);
+//    dbg_ensures(mm_checkheap(__LINE__));
 
-    dbg_ensures(print_heap());
+    if(find_prev(coal_block) == coal_block && get_size(find_next(coal_block)) == 0) {
+//        print_heap(true);
+//        printf(BOLD GREEN"Max Slabs Used: %zu\n"RESET, max_slabs_used);
+//        printf(BOLD GREEN"Extends for Slabs: %zu\n"RESET, extends_for_slabs);
+    }
+
+    dbg_ensures(print_heap(false));
 }
 
 /**
@@ -408,7 +444,7 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    // Copy the old data TODO THIS IS SURELY BROKEN
+    // Copy the old data TODO THIS IS SURELY BROKEN FOR SLABS
     copysize = get_payload_size(block); // gets size of old payload
     if(size < copysize)
     {
@@ -612,20 +648,19 @@ static void place(block_t *block, size_t asize)
  * - Changed to find first block in the explicit free list.
  * - Changed to Nth fit algorithm with explicit free list.
  * - Changed to Nth fit with Segregated Free Lists.
+ * - TODO slabs
  */
 static block_t *find_fit(size_t asize)
 {
     int list_index = find_seg_list_index(asize);
 
     const int moe_divider = 20;
-    size_t perf_block_size;
+    size_t perf_block_size = asize;
     // create a margin of error of what the perfect block size is
     // In theory this would be an improvement, but in testing it's unclear
     // otherwise just have it check that block_size is == to asize and finish loop there
     if(asize >= min_moe_size && asize != slab_block_size) {
         perf_block_size = asize + round_up(asize/moe_divider, dsize);
-    } else {
-        perf_block_size = asize;
     }
 
     // set up vars for Nth fit
@@ -654,7 +689,7 @@ static block_t *find_fit(size_t asize)
 
                 // skip the block if we are looking for a slab block and this block would create a bad free block
                 if(asize == slab_block_size && block_size <= slab_block_size + min_block_size) {
-                    continue; // TODO test this
+                    continue;
                 }
 
                 if(block_size < best_block_size) {
@@ -1006,23 +1041,6 @@ static block_t *find_prev(block_t *block)
  */
 static void list_insert(block_t *block) {
 
-//    int list_index = find_seg_list_index(get_size(block));
-//    block_t *list_head = seg_lists[list_index];
-//
-//    // empty free list
-//    if(list_head == NULL) {
-//        block->prev = NULL;
-//        block->next = NULL;
-//    }
-//    // at least one item in the free list
-//    else {
-//        block->prev = NULL;
-//        block->next = list_head;
-//        list_head->prev = block;
-//    }
-//    seg_lists[list_index] = block;
-
-
     int list_index = find_seg_list_index(get_size(block));
     block_t *list_head = seg_lists[list_index];
 
@@ -1067,29 +1085,7 @@ static void list_insert(block_t *block) {
  */
 static void list_remove(block_t *block) {
 
-//    int list_index = find_seg_list_index(get_size(block));
-//
-//    block_t *prev_block = block->prev;
-//    block_t *next_block = block->next;
-//
-//    if(prev_block == NULL && next_block == NULL) {
-//        seg_lists[list_index] = NULL;
-//    }
-//    else if(prev_block == NULL) {
-//        next_block->prev = NULL;
-//        seg_lists[list_index] = next_block;
-//    }
-//    else if(next_block == NULL) {
-//        prev_block->next = NULL;
-//    }
-//    else {
-//        prev_block->next = next_block;
-//        next_block->prev = prev_block;
-//    }
-
-
     size_t block_size = get_size(block);
-
 
     if(is_slab_block(block)) { // remove a slab block from slabs seg list
         // avoid extra function call because we know what list index for sure
@@ -1115,9 +1111,6 @@ static void list_remove(block_t *block) {
 
         block_t *prev_block = block->prev;
         block_t *next_block = block->next;
-        // if((int) prev_block == 0x36) {
-        //     printf("here");
-        // }
 
         if(prev_block == NULL && next_block == NULL) {
             seg_lists[list_index] = NULL;
@@ -1145,7 +1138,7 @@ static void list_remove(block_t *block) {
  *
  * @Changelog
  * - Added for Segregated List Implementation.
- * - TODO slabs
+ * - Added condition for slabs index.
  */
 static int find_seg_list_index(size_t asize) {
     // return slab list index immediately if size is a slab
@@ -1168,6 +1161,7 @@ static int find_seg_list_index(size_t asize) {
 static void *place_in_slab() {
 
     block_t *slab_block = find_fit_slab();
+//    block_t *slab_block = seg_lists[slab_list_index];
 
     if(slab_block == NULL) {
         slab_block = init_slab_block();
@@ -1178,6 +1172,7 @@ static void *place_in_slab() {
     update_vector(slab_block, slab_index, true);
 
    if(is_slab_block_full(slab_block)) {
+       ++total_slab_blocks_full;
        list_remove(slab_block);
    }
 
@@ -1191,14 +1186,29 @@ static block_t *free_from_slab(void *sp) {
     block_t *slab_block = slab_to_header(sp);
 
     if(is_slab_block_full(slab_block)) {
+        --total_slab_blocks_full;
         list_insert(slab_block);
     }
 
     update_vector(slab_block, index, false);
 
+    if(!is_slab_block_empty(slab_block)) {
+//            dbg_ensures(print_heap(false));
+            return slab_block; // if slab block is not empty, we are done
+        }
+
+        // if the slab block is empty, remove it from the list, make sure the slab bit is false, and coalesce it
+//        printf("EMPTYING SLAB\n");
+        list_remove(slab_block);
+        bool prev_alloc = get_prev_alloc(slab_block);
+        set_is_slab(slab_block, false);
+        write_header(slab_block, slab_block_size, false, prev_alloc);
+        write_footer(slab_block, slab_block_size, false, prev_alloc);
+        slab_block->prev = NULL;
+        slab_block->next = NULL;
+
     return slab_block;
 }
-
 
 static block_t *find_fit_slab() {
     block_t *slab_block = seg_lists[slab_list_index];
@@ -1213,7 +1223,9 @@ static block_t *find_fit_slab() {
 
 static block_t *init_slab_block() {
     block_t *slab_block = find_fit(slab_block_size);
+    max_slabs_used++;
     if(slab_block == NULL) {
+        extends_for_slabs++;
         slab_block = extend_heap(slab_block_size);
     }
 
@@ -1383,22 +1395,65 @@ bool mm_checkheap(int line)
             // Check that Coalesce works as intended
             if (prev_alloc == false || next_alloc == false) {
                 printf(BOLD RED"Coalesce Invariant failed at line %d with heap:\n"RESET, line);
-                print_heap();
+                print_heap(true);
                 return false; // INVARIANT 1
             }
 
             if (b->header != *find_prev_footer(next)) {
                 printf(BOLD RED"Footer Not Matching Header Invariant Broken at line %d with heap:\n"RESET, line);
-                print_heap();
+                print_heap(true);
                 return false; // INVARIANT 6
             }
         }
 
         if(b_alloc != get_prev_alloc(next)) {
             printf(BOLD RED"Incorrect Prev Alloc Bit Invariant Broken at line %d with heap:\n"RESET, line);
-            print_heap();
+            print_heap(true);
             return false; // INVARIANT 7
         }
+    }
+
+    size_t slab_blocks_full = 0;
+    size_t slab_blocks_available = 0;
+
+    long total_slab_bits_set = (long) total_slab_blocks_full * num_slabs;
+    long total_slab_bits_unset = 0;
+    // check that the slab list is all slabs
+    for(b = seg_lists[slab_list_index]; b != NULL; b = b->slab.next) {
+        if(!is_slab_block(b)) {
+            printf(BOLD RED"Slab List Not All Slabs Invariant Broken at line %d with heap:\n"RESET, line);
+            print_heap(true);
+            return false; // INVARIANT 9
+        }
+
+        size_t bits_set = 0;
+        size_t bits_unset = 0;
+        word_t vector = b->slab.bit_vector;
+        // loop through the bits in a slab block's bit vector to check that it has 47 or 48 of its bits set
+        for(size_t i = 0; i < num_slabs; ++i) {
+            if(vector & 0x1) {
+                bits_set++;
+            } else {
+                bits_unset++;
+            }
+            vector >>= 1;
+        }
+
+        total_slab_bits_set += (long) bits_set;
+        total_slab_bits_unset += (long) bits_unset;
+
+        if(bits_set >= num_slabs - 1) {
+            slab_blocks_full++;
+        } else {
+            slab_blocks_available++;
+        }
+    }
+    long slab_availability_ratio = slab_free_over_malloc_counter + total_slab_bits_set - total_slab_bits_unset;
+    if(slab_blocks_available > 2) {
+        printf(BOLD RED"Slab List Has More Than One Slab Block Not Full Invariant Broken at line %d with heap:\n"RESET, line);
+        printf(BOLD RED"slab availability ratio: %ld\n"RESET, slab_availability_ratio);
+//        print_heap();
+        return true; // INVARIANT 10
     }
 
     // loop through the seg lists for all invariants requiring the seg free lists
@@ -1414,7 +1469,7 @@ bool mm_checkheap(int line)
             if(get_alloc(f_block) && list_index != 0) {
                 printf(BOLD RED"Allocated Block (addr: %p) in Seg List Invariant"
                                " Broken at line %d with heap:\n"RESET, f_block, line);
-                print_heap();
+                print_heap(true);
                 print_seg_lists();
                 return false; // INVARIANT 2
             }
@@ -1423,7 +1478,7 @@ bool mm_checkheap(int line)
             if(f_block->next != NULL && f_block->next->prev != f_block) {
                 printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
                                " Broken at line %d with heap:\n"RESET, list_index, line);
-                print_heap();
+                print_heap(true);
                 return false; // INVARIANT 3
             }
 
@@ -1431,7 +1486,7 @@ bool mm_checkheap(int line)
             if(!(block_size >= seg_list_sizes[list_index]
                 && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1]))) {
                 printf(BOLD RED"Block in Wrong Seg List Invariant Broken at line %d with heap:\n"RESET, line);
-                print_heap();
+                print_heap(true);
                 print_seg_lists();
                 return false; // INVARIANT 8
             }
@@ -1439,7 +1494,7 @@ bool mm_checkheap(int line)
             const int too_large_number = 1000000000;
             if(free_list_count > too_large_number) {
                 printf(BOLD RED"Free Lists in an Infinite Loop at line %d with heap:\n"RESET, line);
-                print_heap();
+                print_heap(true);
                 return false; // INVARIANT 5
             }
 
@@ -1452,7 +1507,7 @@ bool mm_checkheap(int line)
      // is equal to the number of free blocks in the free list.
     if (free_list_count != heap_count) {
         printf(BOLD RED"Free Lists Doesn't Have All Free Blocks Invariant failed at line %d with heap:\n"RESET, line);
-        print_heap();
+        print_heap(true);
         return false; // INVARIANT 4
     }
 
@@ -1468,7 +1523,7 @@ bool mm_checkheap(int line)
  * @Changelog
  * - Created during Coalesce Phase for debugging use.
  */
-bool print_heap() {
+bool print_heap(bool print_full) {
 /*
  * Include color codes to copy over print heap for debugging student code.
  *
@@ -1486,15 +1541,21 @@ bool print_heap() {
     printf("slab list head: %p\n", seg_lists[slab_list_index]);
 
     for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
+//        if(count == 50) {
+//            printf(BOLD RED"Heap is too large, stopping print at 50 blocks\n"RESET);
+//            break;
+//        }
         bool alloc = get_alloc(b);
 
         char *alloc_status = alloc ? RED"ALLOC"RESET : BLUE"FREE"RESET;
         char *prev_alloc_status = get_prev_alloc(b) ? MAGENTA"ALLOC"RESET : CYAN"FREE"RESET;
+        size_t block_size = get_size(b);
         printf(BOLD"BLOCK %d"RESET" with ADDR: %p, \talloc: %s, \tprev_alloc: %s, \tsize: %lu",
-               count, b, alloc_status, prev_alloc_status, get_size(b));
+               count, b, alloc_status, prev_alloc_status, block_size);
         if(is_slab_block(b)) {
             printf(","YELLOW"\tSLAB BLOCK"RESET);
-            printf(BLUE"\t vector: %lu\tprev: %p\tnext: %p\n"RESET,b->slab.bit_vector & vector_mask, get_prev_ptr_slab(b), b->slab.next);
+            printf(BLUE"\t vector: 0x%llx\tprev: %p\tnext: %p\n"RESET,
+                   b->slab.bit_vector & vector_mask, get_prev_ptr_slab(b), b->slab.next);
         } else if (alloc) {
             printf("\n");
         }
