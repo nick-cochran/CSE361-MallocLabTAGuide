@@ -15,8 +15,8 @@ LIBS = -lm
 COBJS = memlib.o fcyc.o clock.o stree.o
 NOBJS = mdriver.o mm.o $(COBJS)
 
-MM = mm_squish.c
-#MM = mm_slabs.c
+#MM = mm_squish.c
+MM = mm_slabs.c
 
 all: mdriver
 
