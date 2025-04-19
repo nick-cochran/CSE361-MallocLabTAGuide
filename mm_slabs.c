@@ -111,7 +111,7 @@ static const size_t slab_payload_size = 15; // max number of bytes in a slab
 static const size_t slab_size = 16; // number of bytes in a slab total
 static const size_t num_slabs = 56; // number of slabs in a slab block
 static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
-static const size_t slab_block_size = 928; // size of a slabs + overhead (with an 8 byte footer)
+static const size_t slab_block_size = num_slabs * slab_size + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
 
 static const word_t vector_mask =  ~((word_t) 0xFFFFFFFFFFFFFFFF << num_slabs);
 static const word_t vector_slab_header_mask = 0xFF00000000000000;
