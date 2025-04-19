@@ -1561,7 +1561,7 @@ bool print_heap() {
                count, b, alloc_status, prev_alloc_status, block_size);
         if(is_slab_block(b)) {
             printf(","YELLOW"\tSLAB BLOCK"RESET);
-            printf(BLUE"\t vector: 0x%llx\tprev: %p\tnext: %p\n"RESET,
+            printf(BLUE"\t vector: 0x%lx\tprev: %p\tnext: %p\n"RESET,
                    b->slab.bit_vector & vector_mask, get_prev_ptr_slab(b), b->slab.next);
         } else if (alloc) {
             printf("\n");
