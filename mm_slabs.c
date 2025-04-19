@@ -111,9 +111,9 @@ static const size_t slab_payload_size = 15; // max number of bytes in a slab
 static const size_t slab_size = 16; // number of bytes in a slab total
 static const size_t num_slabs = 56; // number of slabs in a slab block
 static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
-static const size_t slab_block_size = num_slabs * slab_size + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
+static const size_t slab_block_size = 928; // size of a slabs + overhead (with an 8 byte footer)
 
-static const word_t vector_mask =  ~((word_t) 0xFFFFFFFFFFFFFFFF << num_slabs); // all Fs because it makes it easier to test other num_slabs
+static const word_t vector_mask =  ~((word_t) 0xFFFFFFFFFFFFFFFF << num_slabs);
 static const word_t vector_slab_header_mask = 0xFF00000000000000;
 
 
@@ -148,26 +148,22 @@ static block_t *seg_lists[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, N
 
 // Segregated List Constants
 
-static const int seg_list_count = 13;
-static const int slab_list_index = 0; // put slab blocks in the first seg list
+static const size_t seg_list_count = 13;
+static const size_t slab_list_index = 0; // put slab blocks in the first seg list
 // Segregated Free List Sizes
-static const size_t seg_list_idx_1 = 1;    static const size_t seg_list_size_1 = 32;
-static const size_t seg_list_idx_2 = 2;    static const size_t seg_list_size_2 = 48;
-static const size_t seg_list_idx_3 = 3;    static const size_t seg_list_size_3 = 64;
-static const size_t seg_list_idx_4 = 4;    static const size_t seg_list_size_4 = 80;
-static const size_t seg_list_idx_5 = 5;    static const size_t seg_list_size_5 = 96;
-static const size_t seg_list_idx_6 = 6;    static const size_t seg_list_size_6 = 112;
-static const size_t seg_list_idx_7 = 7;    static const size_t seg_list_size_7 = 128;
-static const size_t seg_list_idx_8 = 8;    static const size_t seg_list_size_8 = 256;
-static const size_t seg_list_idx_9 = 9;    static const size_t seg_list_size_9 = 512;
-static const size_t seg_list_idx_10= 10;   static const size_t seg_list_size_10 = 1024;
-static const size_t seg_list_idx_11= 11;   static const size_t seg_list_size_11 = 2048;
-static const size_t seg_list_idx_12= 12;   static const size_t seg_list_size_12 = ~0x0ull; // everything larger than 2048
-static const size_t seg_list_sizes[] = {slab_block_size, seg_list_size_1, seg_list_size_2,
-                                        seg_list_size_3, seg_list_size_4, seg_list_size_5,
-                                        seg_list_size_6, seg_list_size_7, seg_list_size_8,
-                                        seg_list_size_9, seg_list_size_10, seg_list_size_11,
-                                        seg_list_size_12};
+static const size_t seg_list_idx_1 = 1;
+static const size_t seg_list_idx_2 = 2;
+static const size_t seg_list_idx_3 = 3;
+static const size_t seg_list_idx_4 = 4;
+static const size_t seg_list_idx_5 = 5;
+static const size_t seg_list_idx_6 = 6;
+static const size_t seg_list_idx_7 = 7;
+static const size_t seg_list_idx_8 = 8;
+static const size_t seg_list_idx_9 = 9;
+static const size_t seg_list_idx_10= 10;
+static const size_t seg_list_idx_11= 11;
+static const size_t seg_list_idx_12= 12;
+static const size_t seg_list_sizes[] = {slab_block_size, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048, ~0x0ull};
 
 
 /* Function prototypes for internal helper routines */
@@ -250,7 +246,7 @@ bool mm_init(void)
 {
 
     // set seg list heads to NULL for when the code resets
-    for(int i = 0; i < seg_list_count; i++) {
+    for(size_t i = 0; i < seg_list_count; i++) {
         seg_lists[i] = NULL;
     }
 
@@ -1465,7 +1461,7 @@ bool mm_checkheap(int line)
     }
 
     // loop through the seg lists for all invariants requiring the seg free lists
-    int list_index = 1;
+    size_t list_index = 1;
     for(; list_index < seg_list_count; list_index++) {
 
         block_t *f_block = seg_lists[list_index];
@@ -1486,7 +1482,7 @@ bool mm_checkheap(int line)
 
             // Check that the free list is doubly linked
             if(f_block->next != NULL && f_block->next->prev != f_block) {
-                printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
+                printf(BOLD RED"Seg List (index: %zu) Not Doubly Linked Invariant"
                                " Broken at line %d with heap:\n"RESET, list_index, line);
                 print_heap();
                 return false; // INVARIANT 3
@@ -1596,12 +1592,12 @@ bool print_seg_lists() {
  * #define RESET   "\033[0m"
  *
  */
-    int list_index = 0;
+    size_t list_index = 0;
     printf(BOLD"SEGREGATED FREE LISTS\n"RESET);
     printf(BOLD"------------------------------------------------------------\n"RESET);
 
     for(; list_index < seg_list_count; list_index++) {
-        printf(BOLD BLUE"SEG LIST %d with min size: %lu\n"RESET, list_index, seg_list_sizes[list_index]);
+        printf(BOLD BLUE"SEG LIST %zu with min size: %lu\n"RESET, list_index, seg_list_sizes[list_index]);
 
         block_t *block = seg_lists[list_index];
         if(block == NULL) {
