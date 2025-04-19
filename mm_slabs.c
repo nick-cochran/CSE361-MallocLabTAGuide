@@ -82,28 +82,11 @@
 #define dbg_assert(...) assert(__VA_ARGS__)
 #define dbg_ensures(...) assert(__VA_ARGS__)
 #else
-/* When debugging is disnabled, no code gets generated for these */
+/* When debugging is disabled, no code gets generated for these */
 #define dbg_printf(...)
 #define dbg_requires(...)
 #define dbg_assert(...)
 #define dbg_ensures(...)
-#endif
-
-
-// #define SOFT_DEBUG // *** uncomment this line to enable soft debugging ***
-
-#ifdef SOFT_DEBUG
-/* When debugging is enabled, these form aliases to useful functions */
-#define sdbg_printf(...) printf(__VA_ARGS__)
-#define sdbg_requires(...) assert(__VA_ARGS__)
-#define sdbg_assert(...) assert(__VA_ARGS__)
-#define sdbg_ensures(...) assert(__VA_ARGS__)
-#else
-/* When debugging is disnabled, no code gets generated for these */
-#define sdbg_printf(...)
-#define sdbg_requires(...)
-#define sdbg_assert(...)
-#define sdbg_ensures(...)
 #endif
 
 /* Basic constants */
@@ -111,7 +94,8 @@ typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*sizeof(word_t);       // double word size (bytes)
 static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
-static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
+static const size_t chunksize = (1 << 9);    // requires (chunksize % 16 == 0)
+static const size_t mm_init_chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t is_slab_mask = 0x1; // both checks for if it's a slab and a slab block
 static const word_t alloc_mask = 0x2;
@@ -119,31 +103,18 @@ static const word_t prev_alloc_mask = 0x4;
 static const word_t size_mask = ~(word_t)0xF;
 static const word_t ptr_mask = ~(word_t)0x7;
 
-static const int N = 75; // N for Nth fit -- best for seg lists seems to be ~75
+static const int N = 30; // N for Nth fit -- best seems to be ~30
 static const size_t min_moe_size = 256;
 static const size_t max_size = ~0x0;
 
-static const int char_bits = 8; // 8 bits in 1 byte
-static const int num_bits_word_t = sizeof(word_t) * char_bits; // number of bytes in word_t * 8 = number of bits
- // log2(32) = 5 - 1 = 4 --> min_block_size is smallest non-slab so make the smallest seg list the slabs list
-static const int log2_min_block_size = 4;
-static const int last_list_index = 9;
-static const int seg_list_count = 10;
-
-static const int slab_list_index = 0; // put slab blocks in the first seg list
 static const size_t slab_payload_size = 15; // max number of bytes in a slab
-// static const size_t slab_header_size = 1; // max number of bytes in a slab
 static const size_t slab_size = 16; // number of bytes in a slab total
-static const size_t num_slabs = 48; // number of slabs in a slab block
+static const size_t num_slabs = 56; // number of slabs in a slab block
 static const size_t slab_block_overhead = 24; // number of bytes in the metadata for the slab blocks
 static const size_t slab_block_size = num_slabs * slab_size + (slab_block_overhead + wsize); // size of a slabs + overhead (with an 8 byte footer)
 
-static const word_t vector_mask =             ~((word_t) 0xFFFF << 48);
-//static const word_t vector_mask =             0x0000FFFFFFFFFFFF;
-// static const word_t vector_mask_with_bit =    0x0100FFFFFFFFFFFF;
+static const word_t vector_mask =  ~((word_t) 0xFFFFFFFFFFFFFFFF << num_slabs); // all Fs because it makes it easier to test other num_slabs
 static const word_t vector_slab_header_mask = 0xFF00000000000000;
-static const word_t vector_slab_bit =         0x0100000000000000;
-//static const word_t vector_mask = (0x1 << num_slabs)-1;
 
 
 typedef struct block
@@ -166,14 +137,37 @@ typedef struct block
 } block_t;
 
 
-/* Global variables */
+/*** Global Variables ***/
 
-/* Pointer to first block */
+// Pointer to first block
 static block_t *heap_start = NULL; // Pointer to the first block in the heap
 // Segregated Free List Headers
-static block_t *seg_lists[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
-// Segregated Free List Min Sizes -- used only for printing/debugging
-static const size_t seg_list_sizes[] = {slab_block_size, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192};
+static block_t *seg_lists[] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+
+/*** End Global Variables ***/
+
+// Segregated List Constants
+
+static const int seg_list_count = 13;
+static const int slab_list_index = 0; // put slab blocks in the first seg list
+// Segregated Free List Sizes
+static const size_t seg_list_idx_1 = 1;    static const size_t seg_list_size_1 = 32;
+static const size_t seg_list_idx_2 = 2;    static const size_t seg_list_size_2 = 48;
+static const size_t seg_list_idx_3 = 3;    static const size_t seg_list_size_3 = 64;
+static const size_t seg_list_idx_4 = 4;    static const size_t seg_list_size_4 = 80;
+static const size_t seg_list_idx_5 = 5;    static const size_t seg_list_size_5 = 96;
+static const size_t seg_list_idx_6 = 6;    static const size_t seg_list_size_6 = 112;
+static const size_t seg_list_idx_7 = 7;    static const size_t seg_list_size_7 = 128;
+static const size_t seg_list_idx_8 = 8;    static const size_t seg_list_size_8 = 256;
+static const size_t seg_list_idx_9 = 9;    static const size_t seg_list_size_9 = 512;
+static const size_t seg_list_idx_10= 10;   static const size_t seg_list_size_10 = 1024;
+static const size_t seg_list_idx_11= 11;   static const size_t seg_list_size_11 = 2048;
+static const size_t seg_list_idx_12= 12;   static const size_t seg_list_size_12 = ~0x0ull; // everything larger than 2048
+static const size_t seg_list_sizes[] = {slab_block_size, seg_list_size_1, seg_list_size_2,
+                                        seg_list_size_3, seg_list_size_4, seg_list_size_5,
+                                        seg_list_size_6, seg_list_size_7, seg_list_size_8,
+                                        seg_list_size_9, seg_list_size_10, seg_list_size_11,
+                                        seg_list_size_12};
 
 
 /* Function prototypes for internal helper routines */
@@ -208,14 +202,13 @@ static block_t *find_prev(block_t *block);
 static void list_insert(block_t *block);
 static void list_remove(block_t *block);
 
-static int find_seg_list_index(size_t asize);
+static size_t find_seg_list_index(size_t asize);
 
 // SLABS FUNCTIONS
 
 static void *place_in_slab();
 static block_t *free_from_slab(void *sp);
 
-static block_t *find_fit_slab();
 static block_t *init_slab_block();
 static size_t get_free_slab(block_t *slab_block);
 static void *slab_at_index(block_t *slab_block, size_t index);
@@ -234,16 +227,10 @@ static bool is_slab_block_full(block_t *block);
 static bool is_slab_block_empty(block_t *block);
 static void set_is_slab(block_t *block, bool is_slab);
 
-static long slab_free_over_malloc_counter = 0;
-static size_t total_slab_blocks_full = 0;
-
-static size_t max_slabs_used = 0;
-static size_t extends_for_slabs = 0;
-
 // END SLABS FUNCTIONS
 
 bool mm_checkheap(int lineno);
-bool print_heap(bool print_full);
+bool print_heap();
 bool print_seg_lists();
 
 
@@ -257,20 +244,15 @@ bool print_seg_lists();
  * - Added explicit free list head to NULL. (previous commit -- whoops)
  * - Added prev_alloc functionality for Remove Footers.
  * - Added Seg List Initialization.
- * - TODO slabs (pack change)
+ * - Added Slab bit to pack function calls.
  */
 bool mm_init(void) 
 {
-//    printf(BOLD YELLOW"mm_init called\n"RESET);
-//    printf(BOLD YELLOW"%zu slabs are used\n"RESET, slab_use_count);
+
     // set seg list heads to NULL for when the code resets
     for(int i = 0; i < seg_list_count; i++) {
         seg_lists[i] = NULL;
     }
-
-    slab_free_over_malloc_counter = 0;
-    max_slabs_used = 0;
-    extends_for_slabs = 0;
 
     // Create the initial empty heap 
     word_t *start = (word_t *)(mem_sbrk(2*wsize));
@@ -286,7 +268,7 @@ bool mm_init(void)
     heap_start = (block_t *) &(start[1]);
 
     // Extend the empty heap with a free block of chunksize bytes
-    if (extend_heap(chunksize) == NULL)
+    if (extend_heap(mm_init_chunksize) == NULL)
     {
         return false;
     }
@@ -299,15 +281,15 @@ bool mm_init(void)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to utilize space with Remove Footers.
- * - TODO slabs
+ * - Added Slabs functionality.
  */
 void *malloc(size_t size) 
 {
-    sdbg_printf(BOLD RED"MALLOC CALLED with size: %lu\n"RESET, size);
-//    dbg_ensures(print_heap(false));
-//    dbg_ensures(print_seg_lists());
+    dbg_printf(BOLD RED"MALLOC CALLED with size: %lu\n"RESET, size);
+    dbg_ensures(print_heap());
+    dbg_ensures(print_seg_lists());
 
-//    dbg_requires(mm_checkheap(__LINE__));
+    dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
     size_t extendsize; // Amount to extend heap if no fit is found
     block_t *block;
@@ -324,15 +306,7 @@ void *malloc(size_t size)
 
     // run slab code if the size fits in a slab
     if(size <= slab_payload_size) {
-        --slab_free_over_malloc_counter;
-        // TODO run slab code
         void *sp = place_in_slab();
-
-//        printf(MAGENTA BOLD "Placed %zu bytes in a slab\n" RESET, size);
-//        if(size == 7) {
-//            bool _ = print_heap(false);
-//        }
-        dbg_ensures(print_heap(false));
         return sp;
     }
 
@@ -357,12 +331,6 @@ void *malloc(size_t size)
     place(block, asize);
     bp = header_to_payload(block);
 
-    // if(bp == 0x800079ce0) {
-//        printf("bp is 0x800079ce0\n");
-    // }
-
-//    dbg_ensures(mm_checkheap(__LINE__));
-    dbg_ensures(print_heap(false));
     return bp;
 } 
 
@@ -372,13 +340,13 @@ void *malloc(size_t size)
  * @Changelog
  * - Provided Function at Init.
  * - Updated to work better with Remove Footers.
- * - TODO slabs
+ * - Added Slabs functionality.
  */
 void free(void *bp)
 {
-    sdbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
-//    dbg_ensures(print_heap(false));
-//    dbg_ensures(print_seg_lists());
+    dbg_printf(BOLD CYAN"FREE CALLED with addr: %p\n"RESET, bp);
+    dbg_ensures(print_heap());
+    dbg_ensures(print_seg_lists());
 
     block_t *block;
 
@@ -387,28 +355,15 @@ void free(void *bp)
     }
 
     if(is_slab(bp)) {
-        // TODO run slab code
-        ++slab_free_over_malloc_counter;
         block = free_from_slab(bp);
         if(!is_slab_block_empty(block)) {
-            dbg_ensures(print_heap(false));
             return; // if slab block is not empty, don't coalesce
         }
     } else { // regular block
         block = payload_to_header(bp);
     }
 
-    block_t *coal_block = coalesce(block);
-    update_next_prev_alloc(coal_block, false);
-//    dbg_ensures(mm_checkheap(__LINE__));
-
-    if(find_prev(coal_block) == coal_block && get_size(find_next(coal_block)) == 0) {
-//        print_heap(true);
-//        printf(BOLD GREEN"Max Slabs Used: %zu\n"RESET, max_slabs_used);
-//        printf(BOLD GREEN"Extends for Slabs: %zu\n"RESET, extends_for_slabs);
-    }
-
-    dbg_ensures(print_heap(false));
+    update_next_prev_alloc(coalesce(block), false);
 }
 
 /**
@@ -444,7 +399,7 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    // Copy the old data TODO THIS IS SURELY BROKEN FOR SLABS
+    // Copy the old data
     copysize = get_payload_size(block); // gets size of old payload
     if(size < copysize)
     {
@@ -499,7 +454,7 @@ void *calloc(size_t elements, size_t size)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc functionality for Remove Footers.
- * - TODO slabs
+ * - Added Slabs functionality.
  */
 static block_t *extend_heap(size_t size) 
 {
@@ -608,6 +563,7 @@ static block_t *coalesce(block_t * block)
  * - Added explicit free list insert and remove.
  * - Added prev_alloc functionality for Remove Footers.
  * - Slightly modified to work correctly with Segregated Lists.
+ * - Added Slabs bit functionality.
  */
 static void place(block_t *block, size_t asize)
 {
@@ -648,11 +604,11 @@ static void place(block_t *block, size_t asize)
  * - Changed to find first block in the explicit free list.
  * - Changed to Nth fit algorithm with explicit free list.
  * - Changed to Nth fit with Segregated Free Lists.
- * - TODO slabs
+ * - Added checks for Slabs.
  */
 static block_t *find_fit(size_t asize)
 {
-    int list_index = find_seg_list_index(asize);
+    size_t list_index = find_seg_list_index(asize);
 
     const int moe_divider = 20;
     size_t perf_block_size = asize;
@@ -668,7 +624,7 @@ static block_t *find_fit(size_t asize)
     block_t *best_block = NULL;
     size_t best_block_size = max_size; // set to max size (unsigned ~0x0) to compare with first
 
-    int i = list_index;
+    size_t i = list_index;
     for(; i < seg_list_count; i++) { // loop through seg lists
 
         block_t *block = seg_lists[i];
@@ -759,7 +715,7 @@ static size_t round_up(size_t size, size_t n)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO slabs
+ * - Added Slabs bit.
  */
 static word_t pack(size_t size, bool alloc, bool prev_alloc, bool is_slab)
 {
@@ -796,7 +752,7 @@ static size_t extract_size(word_t word)
  *
  * @Changelog
  * - Provided Function at Init.
- * - TODO slabs
+ * - Added slabs check.
  */
 static size_t get_size(block_t *block)
 {
@@ -882,7 +838,7 @@ static bool get_prev_alloc(block_t *block)
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO slabs
+ * - Added Slabs header functionality.
  */
 static void write_header(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
@@ -909,7 +865,7 @@ static void write_header(block_t *block, size_t size, bool alloc, bool prev_allo
  * @Changelog
  * - Provided Function at Init.
  * - Added prev_alloc parameter for Remove Footers.
- * - TODO slabs
+ * - Added Slabs footer.
  */
 static void write_footer(block_t *block, size_t size, bool alloc, bool prev_alloc)
 {
@@ -946,7 +902,7 @@ static void update_next_prev_alloc(block_t *block, bool prev_alloc) {
  *
  * @Changelog
  * - Provided Function at Init.
- * - TODO slabs
+ * - Added Slabs check.
  */
 static block_t *payload_to_header(void *bp)
 {
@@ -1037,11 +993,11 @@ static block_t *find_prev(block_t *block)
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
- * - TODO slabs
+ * - Added separate condition for Slabs list.
  */
 static void list_insert(block_t *block) {
 
-    int list_index = find_seg_list_index(get_size(block));
+    size_t list_index = find_seg_list_index(get_size(block));
     block_t *list_head = seg_lists[list_index];
 
     if(is_slab_block(block)) { // insert slab block into slabs seg list
@@ -1081,7 +1037,7 @@ static void list_insert(block_t *block) {
  * @ChangeLog
  * - Added Function for Explicit Free List.
  * - Modified for Segregated Free Lists.
- * - TODO slabs
+ * - Added separate condition for Slabs list.
  */
 static void list_remove(block_t *block) {
 
@@ -1089,7 +1045,7 @@ static void list_remove(block_t *block) {
 
     if(is_slab_block(block)) { // remove a slab block from slabs seg list
         // avoid extra function call because we know what list index for sure
-        int list_index = slab_list_index;
+        size_t list_index = slab_list_index;
 
         block_t *prev_block = get_prev_ptr_slab(block);
         block_t *next_block = block->slab.next;
@@ -1107,7 +1063,7 @@ static void list_remove(block_t *block) {
         }
 
     } else { // remove all other blocks from its respective seg list
-        int list_index = find_seg_list_index(block_size);
+        size_t list_index = find_seg_list_index(block_size);
 
         block_t *prev_block = block->prev;
         block_t *next_block = block->next;
@@ -1127,52 +1083,69 @@ static void list_remove(block_t *block) {
 }
 
 /**
- * @brief Uses __builtin_clzll to find the index of the seg list for a block of the given size.
+ * @brief Finds the index of the seg list for a block of the given size.
  *
  * @param asize the size of the block going in the free lists
  *
  * @return the index of the correct seg list
  *
- * @credit
- * - Thanks to Andrew Carpenter for the idea and Eric Todd for additional ideas
- *
  * @Changelog
  * - Added for Segregated List Implementation.
- * - Added condition for slabs index.
+ * - Added condition for Slabs index & changed to optimize Util.
  */
-static int find_seg_list_index(size_t asize) {
+static size_t find_seg_list_index(size_t asize) {
     // return slab list index immediately if size is a slab
     if(asize == dsize) {
         return slab_list_index;
     }
-    // returns the number of leading zeros in the binary representation of asize
-    int leading_zeros = __builtin_clzll(asize);
-    // convert to the number of trailing zeros with (num_bits_word_t - leading zeros - 1)
-    int trailing_zeros = num_bits_word_t - leading_zeros - 1;
-    int index = trailing_zeros - log2_min_block_size;  // subtract log2(min_block_size) to start at index 0
-    if (index < 0) index = 0;
-    // return the last index if it is larger than the corresponding size for that index
-    return index <= last_list_index ? index : last_list_index;
+
+    if (asize == seg_list_sizes[seg_list_idx_1]) {
+        return seg_list_idx_1;
+    } else if (asize == seg_list_sizes[seg_list_idx_2]) {
+        return seg_list_idx_2;
+    } else if (asize == seg_list_sizes[seg_list_idx_3]) {
+        return seg_list_idx_3;
+    } else if (asize == seg_list_sizes[seg_list_idx_4]) {
+        return seg_list_idx_4;
+    } else if (asize == seg_list_sizes[seg_list_idx_5]) {
+        return seg_list_idx_5;
+    } else if (asize == seg_list_sizes[seg_list_idx_6]) {
+        return seg_list_idx_6;
+    } else if (asize == seg_list_sizes[seg_list_idx_7]) {
+        return seg_list_idx_7;
+    } else if (asize <= seg_list_sizes[seg_list_idx_8]) {
+        return seg_list_idx_8;
+    } else if (asize <= seg_list_sizes[seg_list_idx_9]) {
+        return seg_list_idx_9;
+    } else if (asize <= seg_list_sizes[seg_list_idx_10]) {
+        return seg_list_idx_10;
+    } else if (asize <= seg_list_sizes[seg_list_idx_11]) {
+        return seg_list_idx_11;
+    } else {
+        return seg_list_idx_12;
+    }
 }
 
 
 // SLAB_SECTION
 
+/**
+ * @brief places into a slab if a slab block exists, otherwise creates a new slab block
+ *
+ * @return a pointer to the slab block
+ */
 static void *place_in_slab() {
 
-    block_t *slab_block = find_fit_slab();
-//    block_t *slab_block = seg_lists[slab_list_index];
+    block_t *slab_block = seg_lists[slab_list_index];
 
     if(slab_block == NULL) {
         slab_block = init_slab_block();
     }
 
     size_t slab_index = get_free_slab(slab_block);
-    dbg_requires(slab_index != num_slabs);
     update_vector(slab_block, slab_index, true);
 
    if(is_slab_block_full(slab_block)) {
-       ++total_slab_blocks_full;
        list_remove(slab_block);
    }
 
@@ -1180,52 +1153,48 @@ static void *place_in_slab() {
     return slab_at_index(slab_block, slab_index);
 }
 
-
+/**
+ * @brief frees a slab in a slab block and frees the slab block if it is empty
+ *
+ * @param sp the pointer to the slab block
+ *
+ * @return a pointer to the slab block
+ */
 static block_t *free_from_slab(void *sp) {
     size_t index = get_slab_index(sp);
     block_t *slab_block = slab_to_header(sp);
 
     if(is_slab_block_full(slab_block)) {
-        --total_slab_blocks_full;
         list_insert(slab_block);
     }
 
     update_vector(slab_block, index, false);
 
     if(!is_slab_block_empty(slab_block)) {
-//            dbg_ensures(print_heap(false));
-            return slab_block; // if slab block is not empty, we are done
-        }
+        return slab_block; // if slab block is not empty, we are done
+    }
 
-        // if the slab block is empty, remove it from the list, make sure the slab bit is false, and coalesce it
-//        printf("EMPTYING SLAB\n");
-        list_remove(slab_block);
-        bool prev_alloc = get_prev_alloc(slab_block);
-        set_is_slab(slab_block, false);
-        write_header(slab_block, slab_block_size, false, prev_alloc);
-        write_footer(slab_block, slab_block_size, false, prev_alloc);
-        slab_block->prev = NULL;
-        slab_block->next = NULL;
+    // if the slab block is empty, remove it from the list, make sure the slab bit is false, and coalesce it
+    list_remove(slab_block);
+    bool prev_alloc = get_prev_alloc(slab_block);
+    set_is_slab(slab_block, false);
+    write_header(slab_block, slab_block_size, false, prev_alloc);
+    write_footer(slab_block, slab_block_size, false, prev_alloc);
+    slab_block->prev = NULL;
+    slab_block->next = NULL;
 
     return slab_block;
 }
 
-static block_t *find_fit_slab() {
-    block_t *slab_block = seg_lists[slab_list_index];
-    for(; slab_block != NULL; slab_block = slab_block->next) {
-        if(!is_slab_block_full(slab_block)) {
-            return slab_block;
-        }
-    }
-    return NULL;
-}
-
-
+/**
+ * @brief initializes a slab block by finding a free block of the correct size
+ *        and splitting it if necessary.  Also then initializes the slab bit vector.
+ *
+ * @return a pointer to the slab block
+ */
 static block_t *init_slab_block() {
     block_t *slab_block = find_fit(slab_block_size);
-    max_slabs_used++;
     if(slab_block == NULL) {
-        extends_for_slabs++;
         slab_block = extend_heap(slab_block_size);
     }
 
@@ -1248,9 +1217,8 @@ static block_t *init_slab_block() {
         update_next_prev_alloc(slab_block, true);
     }
 
-    slab_block->slab.bit_vector = vector_slab_bit;
-
-    size_t index = 1;
+    // initialize the slab mini headers
+    size_t index = 0;
     for(; index < num_slabs; ++index) {
         void *sp = slab_at_index(slab_block, index);
         pack_mini_header(sp, index);
@@ -1260,7 +1228,13 @@ static block_t *init_slab_block() {
     return slab_block;
 }
 
-
+/**
+ * @brief returns the index of the first free slab in the slab block
+ *
+ * @param slab_block the slab block to check
+ *
+ * @return the index of the first free slab, or num_slabs if none are free
+ */
 static size_t get_free_slab(block_t *slab_block) {
     size_t pos = 0;
 
@@ -1280,12 +1254,25 @@ static size_t get_free_slab(block_t *slab_block) {
     return num_slabs;
 }
 
-
+/**
+ * @brief returns the address of the slab at the given index
+ *
+ * @param slab_block the slab block to check
+ * @param index the index of the slab
+ *
+ * @return a void pointer to the slab at the given index
+ */
 static void *slab_at_index(block_t *slab_block, size_t index) {
     return (void *) (slab_block->slab.payload + (index * slab_size));
 }
 
-
+/**
+ * @brief updates the bit vector of the slab block to reflect the allocation status
+ *
+ * @param slab_block the slab block to update
+ * @param index the index of the slab to update
+ * @param alloc true if the slab is being allocated, false if it is being freed
+ */
 static void update_vector(block_t *slab_block, size_t index, bool alloc) {
     word_t vector = slab_block->slab.bit_vector;
     word_t index_mask = 0x1ull << index;
@@ -1297,62 +1284,126 @@ static void update_vector(block_t *slab_block, size_t index, bool alloc) {
     }
 }
 
-
+/**
+ * @brief returns the previous pointer of the slab block
+ *
+ * @param slab_block the slab block to use
+ *
+ * @return a pointer to the previous block
+ */
 static block_t *get_prev_ptr_slab(block_t *slab_block) {
     return (block_t *) (slab_block->header & ptr_mask);
 }
 
-
+/**
+ * @brief sets the previous pointer of the slab block
+ *
+ * @param slab_block the slab block to use
+ * @param prev_block the previous block to point to
+ */
 static void set_prev_ptr_slab(block_t *slab_block, block_t *prev_block) {
     slab_block->header = (slab_block->header & ~ptr_mask) | (word_t) prev_block;
 }
 
-
+/**
+ * @brief returns the mini header of a slab
+ *
+ * @param sp a pointer to the slab
+ *
+ * @return a pointer to the mini header
+ */
 static char *slab_to_mini_header(void *sp) {
     return ((char *) sp)-1;
 }
 
-
+/**
+ * @brief returns the index of the slab in the slab block
+ *
+ * @param sp a pointer to the slab
+ *
+ * @return the index of the slab
+ */
 static size_t get_slab_index(void *sp) {
     char mini_header = *slab_to_mini_header(sp);
     return (size_t) ((mini_header & ~is_slab_mask) >> 1);
 }
 
-
+/**
+ * @brief returns the header of the slab block from a pointer to a slab
+ *
+ * @param sp a pointer to a slab
+ *
+ * @return a pointer to the slab block
+ */
 static block_t *slab_to_header(void *sp) {
     size_t index = get_slab_index(sp);
     return (block_t *) (sp - (index * slab_size) - slab_block_overhead);
 }
 
-
+/**
+ * @brief packs the mini header of a slab with the given index
+ *
+ * @param sp a pointer to the slab
+ * @param index the index of the slab
+ */
 static void pack_mini_header(void *sp, size_t index) {
     char *header = slab_to_mini_header(sp);
+     // left shift by one to put the is_slab bit in the right place
     *header = (index << 1) | is_slab_mask;
 }
 
-
+/**
+ * @brief returns true if the block is a slab block, false otherwise
+ *
+ * @param block the block to check
+ *
+ * @return true if the block is a slab block, false otherwise
+ */
 static bool is_slab_block(block_t *block) {
     return block->header & is_slab_mask;
 }
 
-
+/**
+ * @brief returns true if the pointer is a slab, false otherwise
+ *
+ * @param sp the pointer to check
+ *
+ * @return true if the pointer is a slab, false otherwise
+ */
 static bool is_slab(void *sp) {
     return *slab_to_mini_header(sp) & is_slab_mask;
 }
 
-
+/**
+ * @brief returns if the slab block is full
+ *
+ * @param block the block to check
+ *
+ * @return true if the block is a slab block, false otherwise
+ */
 static bool is_slab_block_full(block_t *block) {
     return !((block->slab.bit_vector & ~vector_slab_header_mask) ^ vector_mask);
 }
 
-
+/**
+ * @brief returns true if the slab block is empty
+ *
+ * @param block the block to check
+ *
+ * @return true if the block is a slab block, false otherwise
+ */
 static bool is_slab_block_empty(block_t *block) {
     return !(block->slab.bit_vector & ~vector_slab_header_mask);
 }
 
-
+/**
+ * @brief sets the slab bit of a block to true or false
+ *
+ * @param block the block to set the slab bit for
+ * @param is_slab true if the block is a slab block, false otherwise
+ */
 static void set_is_slab(block_t *block, bool is_slab) {
-    block->header = is_slab ? block->header | is_slab_mask : block->header & ~is_slab_mask;
+    block->header = is_slab ? (block->header | is_slab_mask) : (block->header & ~is_slab_mask);
 }
 
 
@@ -1372,7 +1423,7 @@ static void set_is_slab(block_t *block, bool is_slab) {
  * - Added Explicit Free List Invariants -- 2, 3, 4, 5.
  * - Added Remove Footers Invariants -- 6, 7.
  * - Added Segregated Free List Invariant -- 8.
- * - TODO slabs
+ * - No Slabs Invariants Added.
  */
 bool mm_checkheap(int line)
 {
@@ -1395,65 +1446,22 @@ bool mm_checkheap(int line)
             // Check that Coalesce works as intended
             if (prev_alloc == false || next_alloc == false) {
                 printf(BOLD RED"Coalesce Invariant failed at line %d with heap:\n"RESET, line);
-                print_heap(true);
+                print_heap();
                 return false; // INVARIANT 1
             }
 
             if (b->header != *find_prev_footer(next)) {
                 printf(BOLD RED"Footer Not Matching Header Invariant Broken at line %d with heap:\n"RESET, line);
-                print_heap(true);
+                print_heap();
                 return false; // INVARIANT 6
             }
         }
 
         if(b_alloc != get_prev_alloc(next)) {
             printf(BOLD RED"Incorrect Prev Alloc Bit Invariant Broken at line %d with heap:\n"RESET, line);
-            print_heap(true);
+            print_heap();
             return false; // INVARIANT 7
         }
-    }
-
-    size_t slab_blocks_full = 0;
-    size_t slab_blocks_available = 0;
-
-    long total_slab_bits_set = (long) total_slab_blocks_full * num_slabs;
-    long total_slab_bits_unset = 0;
-    // check that the slab list is all slabs
-    for(b = seg_lists[slab_list_index]; b != NULL; b = b->slab.next) {
-        if(!is_slab_block(b)) {
-            printf(BOLD RED"Slab List Not All Slabs Invariant Broken at line %d with heap:\n"RESET, line);
-            print_heap(true);
-            return false; // INVARIANT 9
-        }
-
-        size_t bits_set = 0;
-        size_t bits_unset = 0;
-        word_t vector = b->slab.bit_vector;
-        // loop through the bits in a slab block's bit vector to check that it has 47 or 48 of its bits set
-        for(size_t i = 0; i < num_slabs; ++i) {
-            if(vector & 0x1) {
-                bits_set++;
-            } else {
-                bits_unset++;
-            }
-            vector >>= 1;
-        }
-
-        total_slab_bits_set += (long) bits_set;
-        total_slab_bits_unset += (long) bits_unset;
-
-        if(bits_set >= num_slabs - 1) {
-            slab_blocks_full++;
-        } else {
-            slab_blocks_available++;
-        }
-    }
-    long slab_availability_ratio = slab_free_over_malloc_counter + total_slab_bits_set - total_slab_bits_unset;
-    if(slab_blocks_available > 2) {
-        printf(BOLD RED"Slab List Has More Than One Slab Block Not Full Invariant Broken at line %d with heap:\n"RESET, line);
-        printf(BOLD RED"slab availability ratio: %ld\n"RESET, slab_availability_ratio);
-//        print_heap();
-        return true; // INVARIANT 10
     }
 
     // loop through the seg lists for all invariants requiring the seg free lists
@@ -1462,14 +1470,16 @@ bool mm_checkheap(int line)
 
         block_t *f_block = seg_lists[list_index];
         for(; f_block != NULL; f_block = f_block->next) {
-            free_list_count++; // increment count of free list blocks
+            if(list_index != slab_list_index) {
+                free_list_count++; // increment count of free list blocks
+            }
             size_t block_size = get_size(f_block);
 
             // Check that the free list block is actually free, but ignore the slabs list which is marked as allocated
-            if(get_alloc(f_block) && list_index != 0) {
+            if(get_alloc(f_block) && list_index != slab_list_index) {
                 printf(BOLD RED"Allocated Block (addr: %p) in Seg List Invariant"
                                " Broken at line %d with heap:\n"RESET, f_block, line);
-                print_heap(true);
+                print_heap();
                 print_seg_lists();
                 return false; // INVARIANT 2
             }
@@ -1478,15 +1488,15 @@ bool mm_checkheap(int line)
             if(f_block->next != NULL && f_block->next->prev != f_block) {
                 printf(BOLD RED"Seg List (index: %d) Not Doubly Linked Invariant"
                                " Broken at line %d with heap:\n"RESET, list_index, line);
-                print_heap(true);
+                print_heap();
                 return false; // INVARIANT 3
             }
 
             // Check that all blocks are in the correct Seg List
-            if(!(block_size >= seg_list_sizes[list_index]
-                && (list_index+1 == seg_list_count || block_size < seg_list_sizes[list_index+1]))) {
+            if((block_size > seg_list_sizes[list_index]
+                    && (list_index-1 == slab_list_index || block_size <= seg_list_sizes[list_index-1]))) {
                 printf(BOLD RED"Block in Wrong Seg List Invariant Broken at line %d with heap:\n"RESET, line);
-                print_heap(true);
+                print_heap();
                 print_seg_lists();
                 return false; // INVARIANT 8
             }
@@ -1494,7 +1504,7 @@ bool mm_checkheap(int line)
             const int too_large_number = 1000000000;
             if(free_list_count > too_large_number) {
                 printf(BOLD RED"Free Lists in an Infinite Loop at line %d with heap:\n"RESET, line);
-                print_heap(true);
+                print_heap();
                 return false; // INVARIANT 5
             }
 
@@ -1507,7 +1517,7 @@ bool mm_checkheap(int line)
      // is equal to the number of free blocks in the free list.
     if (free_list_count != heap_count) {
         printf(BOLD RED"Free Lists Doesn't Have All Free Blocks Invariant failed at line %d with heap:\n"RESET, line);
-        print_heap(true);
+        print_heap();
         return false; // INVARIANT 4
     }
 
@@ -1522,8 +1532,9 @@ bool mm_checkheap(int line)
  *
  * @Changelog
  * - Created during Coalesce Phase for debugging use.
+ * - Added Slabs.
  */
-bool print_heap(bool print_full) {
+bool print_heap() {
 /*
  * Include color codes to copy over print heap for debugging student code.
  *
@@ -1541,10 +1552,6 @@ bool print_heap(bool print_full) {
     printf("slab list head: %p\n", seg_lists[slab_list_index]);
 
     for (block_t * b = heap_start; get_size(b) != 0; b = find_next(b)) {
-//        if(count == 50) {
-//            printf(BOLD RED"Heap is too large, stopping print at 50 blocks\n"RESET);
-//            break;
-//        }
         bool alloc = get_alloc(b);
 
         char *alloc_status = alloc ? RED"ALLOC"RESET : BLUE"FREE"RESET;
