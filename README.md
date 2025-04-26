@@ -1,7 +1,7 @@
 # CSE361S Malloc Lab TA Solution Guide
 
 ### Author: Nick Cochran
-### Email: c.nick@wustl.edu
+### Email: nickcochran02@gmail.com | c.nick@wustl.edu
 
 ## Note to Future TAs and Head TAs
 
@@ -19,9 +19,9 @@ especially because I intentionally made it so all changes for an implementation 
 
 - Every commit is a new implementation for the malloc lab.
   - When it comes to later implementations, these are separate branches that are merged into main
-        to make a clean commit history for each implementation.
+        to make a clean commit history for each implementation that can be viewed in a single "commit".
   - **For these implementations click on "Merge pull request" in the commit history for the respective
-    	implementation detailed later in the message to see the full commit history.**
+    	implementation detailed later in the message to see the changes for the full commit history in that branch.**
 - The commit message details which implementation the commit is for.
 - Each function also has a changelog section detailing when changes have been made to that function.
     - This is meant to help identify which functions need to be changed for each implementation.
